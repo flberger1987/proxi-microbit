@@ -299,17 +299,23 @@ float mz = -my_raw;
 | Batteriefach-Anschluss | Stromversorgung (4x AA) |
 | Motor-Treiber | Steuerung der Antriebsmotoren |
 
-### Pin-Zuordnung (zu verifizieren durch Reverse Engineering)
+### Pin-Zuordnung (Verifiziert 2025-01-25)
 
-| micro:bit Pin | Proxi Funktion (vermutet) |
-|---------------|---------------------------|
-| P0 | Motor Links PWM |
-| P1 | Motor Rechts PWM |
-| P2 | Buzzer |
-| P8 | IR Sensor Links |
-| P12 | IR Sensor Rechts |
+Der Kosmos Proxi ist ein **Hexapod** (6-Bein-Roboter), kein Radfahrzeug!
 
-**Hinweis**: Kein öffentlicher Schaltplan für die Proxi-Platine verfügbar!
+| micro:bit Pin | GPIO | Proxi Funktion |
+|---------------|------|----------------|
+| P13 | P0.17 | Hexapod Vorwärts gehen |
+| P14 | P0.01 | Hexapod Rückwärts gehen |
+| P15 | P0.13 | Hexapod Links drehen |
+| P16 | P1.02 | Hexapod Rechts drehen |
+
+**Motor-Konfiguration:**
+- **Geh-Motor:** H-Brücke mit P13 (vorwärts) / P14 (rückwärts)
+- **Dreh-Motor:** H-Brücke mit P15 (links) / P16 (rechts)
+- Nur ein Pin pro Richtung HIGH, niemals beide gleichzeitig!
+
+**Hinweis**: Reverse-Engineering durchgeführt mittels GPIO-Scan.
 
 ---
 
