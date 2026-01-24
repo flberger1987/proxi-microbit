@@ -1,0 +1,36 @@
+# Build directories
+build/
+__pycache__/
+*.pyc
+
+# Cache directories
+.cache/
+.grepai/
+.claude/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Compiled files
+*.o
+*.a
+*.elf
+*.hex
+*.bin
+*.map
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak

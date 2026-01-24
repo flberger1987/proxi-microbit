@@ -1,0 +1,120 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Device Tree Overlay for Kosmos Proxi Hexapod Robot
+ *
+ * Verified Pin-Belegung (2024-01-24):
+ * - P13 (P0.17) = Walk Forward
+ * - P14 (P0.01) = Walk Backward
+ * - P15 (P0.13) = Turn Left
+ * - P16 (P1.02) = Turn Right
+ * - P0.00      = Speaker (integriert, PWM1)
+ *
+ * PWM-Zuordnung:
+ * - PWM0: LED Matrix (vom Board verwendet)
+ * - PWM1: Speaker/Buzzer (P0.00)
+ * - PWM2: Walk Motor (P13 fwd, P14 bwd)
+ * - PWM3: Turn Motor (P15 left, P16 right)
+ */
+
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+    aliases {
+        pwm-led0 = &speaker;
+        walk-fwd = &walk_fwd;
+        walk-bwd = &walk_bwd;
+        turn-left = &turn_left;
+        turn-right = &turn_right;
+    };
+
+    /* Speaker on P0.00 using PWM1 channel 0 */
+    speaker_pwm: speaker-pwm {
+        compatible = "pwm-leds";
+        status = "okay";
+        speaker: speaker_ch {
+            pwms = <&pwm1 0 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
+            label = "Speaker";
+        };
+    };
+
+    /* Walk Motor - Forward (P13) and Backward (P14) */
+    walk_motor_pwm: walk-motor-pwm {
+        compatible = "pwm-leds";
+        status = "okay";
+        walk_fwd: walk_fwd_ch {
+            pwms = <&pwm2 0 PWM_USEC(1000) PWM_POLARITY_NORMAL>;
+            label = "Walk Forward";
+        };
+        walk_bwd: walk_bwd_ch {
+            pwms = <&pwm2 1 PWM_USEC(1000) PWM_POLARITY_NORMAL>;
+            label = "Walk Backward";
+        };
+    };
+
+    /* Turn Motor - Left (P15) and Right (P16) */
+    turn_motor_pwm: turn-motor-pwm {
+        compatible = "pwm-leds";
+        status = "okay";
+        turn_left: turn_left_ch {
+            pwms = <&pwm3 0 PWM_USEC(1000) PWM_POLARITY_NORMAL>;
+            label = "Turn Left";
+        };
+        turn_right: turn_right_ch {
+            pwms = <&pwm3 1 PWM_USEC(1000) PWM_POLARITY_NORMAL>;
+            label = "Turn Right";
+        };
+    };
+};
+
+/* PWM2 for walk motor */
+&pwm2 {
+    status = "okay";
+    pinctrl-0 = <&pwm2_default>;
+    pinctrl-1 = <&pwm2_sleep>;
+    pinctrl-names = "default", "sleep";
+};
+
+/* PWM3 for turn motor */
+&pwm3 {
+    status = "okay";
+    pinctrl-0 = <&pwm3_default>;
+    pinctrl-1 = <&pwm3_sleep>;
+    pinctrl-names = "default", "sleep";
+};
+
+&pinctrl {
+    /* PWM2: Walk motor pins */
+    pwm2_default: pwm2_default {
+        group1 {
+            psels = <NRF_PSEL(PWM_OUT0, 0, 17)>,  /* P13 = P0.17 = Walk Fwd */
+                    <NRF_PSEL(PWM_OUT1, 0, 1)>;   /* P14 = P0.01 = Walk Bwd */
+        };
+    };
+    pwm2_sleep: pwm2_sleep {
+        group1 {
+            psels = <NRF_PSEL(PWM_OUT0, 0, 17)>,
+                    <NRF_PSEL(PWM_OUT1, 0, 1)>;
+            low-power-enable;
+        };
+    };
+
+    /* PWM3: Turn motor pins */
+    pwm3_default: pwm3_default {
+        group1 {
+            psels = <NRF_PSEL(PWM_OUT0, 0, 13)>,  /* P15 = P0.13 = Turn Left */
+                    <NRF_PSEL(PWM_OUT1, 1, 2)>;   /* P16 = P1.02 = Turn Right */
+        };
+    };
+    pwm3_sleep: pwm3_sleep {
+        group1 {
+            psels = <NRF_PSEL(PWM_OUT0, 0, 13)>,
+                    <NRF_PSEL(PWM_OUT1, 1, 2)>;
+            low-power-enable;
+        };
+    };
+};
+
+/* ADC for IR Sensors (optional, for future use) */
+&adc {
+    status = "okay";
+};
