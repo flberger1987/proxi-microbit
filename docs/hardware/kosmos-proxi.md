@@ -2,7 +2,7 @@
 
 ## Übersicht
 
-Der Kosmos Proxi (Art.Nr. 620585) ist ein Programmier-Roboter, der mit dem BBC micro:bit gesteuert wird.
+Der Kosmos Proxi (Art.Nr. 620585) ist ein **Hexapod** (6-Bein-Roboter), der mit dem BBC micro:bit gesteuert wird. Er kann vorwärts/rückwärts gehen und sich um seine Achse drehen.
 
 ## Offizielle Quellen
 
@@ -32,32 +32,46 @@ Die Proxi Zusatzplatine erweitert den micro:bit um roboterspezifische Funktionen
 | Infrarot-Sensoren | Hinderniserkennung, Linienfolgen |
 | Buzzer | Akustische Ausgabe |
 | Batteriefach-Anschluss | Stromversorgung |
-| Motor-Treiber | Steuerung der Antriebsmotoren |
+| Motor-Treiber | Steuerung der Hexapod-Motoren |
 
 ## Schaltplan
 
-**Hinweis**: Es wurde kein öffentlich verfügbarer Schaltplan für die Proxi-Zusatzplatine gefunden.
+**Hinweis**: Kein öffentlicher Schaltplan verfügbar. Pin-Belegung wurde durch Reverse Engineering ermittelt.
 
-Mögliche Quellen:
-1. Direkter Kontakt mit KOSMOS Kundenservice (service@kosmos.de)
-2. Reverse Engineering der Platine
-3. micro:bit Community Foren
+## Pin-Zuordnung (Verifiziert 2025-01-25)
 
-## Pin-Zuordnung (geschätzt)
+Der Proxi verwendet **zwei Motoren** mit H-Brücken-Steuerung:
 
-Basierend auf typischen micro:bit Roboter-Erweiterungen:
+### Motor-Pins
+
+| micro:bit Pin | nRF GPIO | Funktion |
+|---------------|----------|----------|
+| P13 | P0.17 | Geh-Motor: Vorwärts |
+| P14 | P0.01 | Geh-Motor: Rückwärts |
+| P15 | P0.13 | Dreh-Motor: Links |
+| P16 | P1.02 | Dreh-Motor: Rechts |
+
+### H-Brücken-Logik
+
+**Geh-Motor (P13/P14):**
+- Vorwärts: P13=HIGH, P14=LOW
+- Rückwärts: P13=LOW, P14=HIGH
+- Stopp: P13=LOW, P14=LOW
+
+**Dreh-Motor (P15/P16):**
+- Links drehen: P15=HIGH, P16=LOW
+- Rechts drehen: P15=LOW, P16=HIGH
+- Stopp: P15=LOW, P16=LOW
+
+**WARNUNG**: Niemals beide Pins einer H-Brücke gleichzeitig HIGH setzen!
+
+### Weitere Pins (nicht verifiziert)
 
 | micro:bit Pin | Proxi Funktion (vermutet) |
 |---------------|---------------------------|
-| P0 | Motor Links PWM |
-| P1 | Motor Rechts PWM |
-| P2 | Buzzer |
 | P8 | IR Sensor Links |
 | P12 | IR Sensor Rechts |
-| P13-15 | SPI (reserviert) |
 | P19/20 | I2C (reserviert) |
-
-**Achtung**: Diese Zuordnung muss durch Analyse der Platine verifiziert werden!
 
 ## Standard-Programmierung
 
