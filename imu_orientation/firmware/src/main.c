@@ -37,7 +37,6 @@
 #include "ir_sensors.h"
 #include "autonomous_nav.h"
 #include "yaw_controller.h"
-#include "sysid.h"
 
 /* ============================================================================
  * Display Animations
@@ -286,12 +285,13 @@ static struct mb_display *disp;
 static enum robot_state current_display_state = -1;  /* Force first update */
 
 /* Long press detection */
-#define LONG_PRESS_MS 1000
+#define LONG_PRESS_MS 1000        /* Button A: 1 second for pairing */
+#define LONG_PRESS_CAL_MS 3000    /* Button B: 3 seconds for calibration */
 static volatile int64_t button_a_press_time;
 static volatile bool button_a_pressed;
 static volatile bool long_press_triggered;
 
-/* Button B long press for IR calibration */
+/* Button B long press for magnetometer calibration */
 static volatile int64_t button_b_press_time;
 static volatile bool button_b_pressed;
 static volatile bool button_b_long_press_triggered;
@@ -433,17 +433,70 @@ static void on_controller_input(const uint8_t *data, uint16_t len)
     bool dpad_up_pressed = dpad_changed && (input.dpad == XBOX_DPAD_UP);
     bool dpad_down_pressed = dpad_changed && (input.dpad == XBOX_DPAD_DOWN);
     bool dpad_left_pressed = dpad_changed && (input.dpad == XBOX_DPAD_LEFT);
+    bool dpad_right_pressed = dpad_changed && (input.dpad == XBOX_DPAD_RIGHT);
 
-    /* ========== Manual Override Detection ========== */
-    if (autonav_is_enabled()) {
+    /* ========== D-Pad Handling (BEFORE manual override check!) ========== */
+    /*
+     * D-Pad controls heading direction in autonomous mode:
+     * - UP: Forward (heading hold) - enable if not enabled, no effect if already forward
+     * - DOWN: 180° U-turn
+     * - LEFT: -90° turn (counter-clockwise)
+     * - RIGHT: +90° turn (clockwise)
+     *
+     * Inputs are ignored while already turning (AUTONAV_TURNING state).
+     * D-Pad NEVER disables autonomous mode - only stick/trigger does that.
+     */
+    enum autonav_state nav_state = autonav_get_state();
+    bool is_turning = (nav_state == AUTONAV_TURNING);
+
+    /* D-Pad UP: Enable autonomous mode / confirm forward direction */
+    if (dpad_up_pressed) {
+        if (!autonav_is_enabled()) {
+            /* Not enabled yet - start autonomous mode */
+            autonav_enable();
+            robot_set_state(ROBOT_STATE_AUTONOMOUS);
+        }
+        /* If already in HEADING_HOLD or TURNING, UP does nothing */
+    }
+
+    /* D-Pad DOWN: 180° U-turn (only if not already turning) */
+    if (dpad_down_pressed) {
+        if (autonav_is_enabled() && !is_turning) {
+            autonav_turn_relative(180);
+        }
+    }
+
+    /* D-Pad LEFT: +90° turn CCW (only if not already turning) */
+    if (dpad_left_pressed) {
+        printk("DPAD LEFT: enabled=%d is_turning=%d state=%d\n",
+               autonav_is_enabled(), is_turning, nav_state);
+        if (autonav_is_enabled() && !is_turning) {
+            autonav_turn_relative(+90);  /* CCW = heading increases */
+        }
+    }
+
+    /* D-Pad RIGHT: -90° turn CW (only if not already turning) */
+    if (dpad_right_pressed) {
+        printk("DPAD RIGHT: enabled=%d is_turning=%d state=%d\n",
+               autonav_is_enabled(), is_turning, nav_state);
+        if (autonav_is_enabled() && !is_turning) {
+            autonav_turn_relative(-90);  /* CW = heading decreases */
+        }
+    }
+
+    /* Update previous D-Pad state */
+    prev_dpad = input.dpad;
+
+    /* ========== Manual Override Detection (AFTER D-Pad!) ========== */
+    /* Skip override check if D-Pad was just pressed (intentional input) */
+    if (autonav_is_enabled() && !dpad_changed) {
         /* Check for manual input that should override autonomous mode:
-         * - Any stick movement outside deadzone
+         * - Any stick movement outside deadzone (10% from center)
          * - Any trigger > 10%
          * - Emergency stop combo
          */
-        int16_t stick_deadzone = HID_DEFAULT_DEADZONE;
-        bool stick_active = (hid_apply_deadzone(input.left_stick_y, stick_deadzone) != 0) ||
-                           (hid_apply_deadzone(input.right_stick_y, stick_deadzone) != 0);
+        bool stick_active = (hid_apply_deadzone(input.left_stick_y, HID_DEFAULT_DEADZONE) != 0) ||
+                           (hid_apply_deadzone(input.right_stick_y, HID_DEFAULT_DEADZONE) != 0);
         bool trigger_active = (input.left_trigger > HID_TRIGGER_THRESHOLD) ||
                              (input.right_trigger > HID_TRIGGER_THRESHOLD);
         bool emergency_stop = ((input.buttons & (XBOX_BTN_LB | XBOX_BTN_RB)) == (XBOX_BTN_LB | XBOX_BTN_RB)) ||
@@ -453,31 +506,6 @@ static void on_controller_input(const uint8_t *data, uint16_t len)
             autonav_manual_override();
         }
     }
-
-    /* ========== D-Pad Handling ========== */
-    /* D-Pad UP: Toggle autonomous navigation */
-    if (dpad_up_pressed) {
-        if (autonav_is_enabled()) {
-            autonav_disable();
-            robot_set_state(ROBOT_STATE_CONNECTED);
-        } else {
-            autonav_enable();
-            robot_set_state(ROBOT_STATE_AUTONOMOUS);
-        }
-    }
-
-    /* D-Pad DOWN: Start yaw test (only when autonomous mode is off) */
-    if (dpad_down_pressed && !autonav_is_enabled() && !autonav_is_yaw_test_running()) {
-        autonav_start_yaw_test();
-    }
-
-    /* D-Pad LEFT: Start system identification test */
-    if (dpad_left_pressed && !sysid_is_running() && !autonav_is_enabled()) {
-        sysid_run_full_test();
-    }
-
-    /* Update previous D-Pad state */
-    prev_dpad = input.dpad;
 
     /* ========== Face Button Handling ========== */
     /* A button (Cross on PS5) → Shoot sound + Smile face! */
@@ -600,10 +628,8 @@ static void button_cb(struct input_event *evt, void *user_data)
             if (!button_b_long_press_triggered) {
                 audio_play(SOUND_BUTTON_PRESS);
 
-                /* Short press - cycle GPIO in test mode, else emergency stop */
-                if (ir_sensors_gpio_test_active()) {
-                    ir_sensors_gpio_test_next();
-                } else if (robot_get_state() == ROBOT_STATE_CONNECTED) {
+                /* Short press - emergency stop */
+                if (robot_get_state() == ROBOT_STATE_CONNECTED) {
                     motor_emergency_stop();
                     printk("Emergency stop triggered\n");
                 }
@@ -640,9 +666,14 @@ int main(void)
     printk("Long-press Button A: Pair controller\n");
     printk("Short-press Button B: Emergency stop\n");
     printk("Long-press Button B: Magnetometer calibration (60s)\n");
-    printk("D-Pad UP: Toggle autonomous mode\n");
-    printk("D-Pad DOWN: Start yaw test\n");
-    printk("D-Pad LEFT: System identification test\n");
+    printk("\n");
+    printk("D-Pad Controls:\n");
+    printk("  UP:    Start autonomous mode (heading-hold)\n");
+    printk("  DOWN:  180 U-turn (auto) / Yaw test (manual)\n");
+    printk("  LEFT:  -90 turn (auto) / System ID (manual)\n");
+    printk("  RIGHT: +90 turn (auto only)\n");
+    printk("\n");
+    printk("Exit auto mode: Stick or trigger (manual override)\n");
     printk("Triggers: Yaw rate control (max 20 deg/s)\n\n");
 
     /* Get display */
@@ -767,10 +798,10 @@ int main(void)
             }
         }
 
-        /* Check for long press on Button B (Magnetometer calibration) */
+        /* Check for long press on Button B (Magnetometer calibration - 3 seconds) */
         if (button_b_pressed && !button_b_long_press_triggered) {
             int64_t elapsed = k_uptime_get() - button_b_press_time;
-            if (elapsed >= LONG_PRESS_MS) {
+            if (elapsed >= LONG_PRESS_CAL_MS) {
                 button_b_long_press_triggered = true;
 
                 /* Toggle magnetometer calibration */
@@ -778,8 +809,8 @@ int main(void)
                     /* Already calibrating - can't stop early, just notify */
                     printk("Magnetometer calibration in progress...\n");
                 } else {
-                    /* Start magnetometer calibration (60 seconds) */
-                    printk("Starting magnetometer calibration (60s)...\n");
+                    /* Start magnetometer calibration (30 seconds) */
+                    printk("Starting magnetometer calibration (30s)...\n");
                     printk("Slowly rotate the device in ALL directions!\n");
                     sensors_start_calibration();
                     audio_play(SOUND_PAIRING_START);

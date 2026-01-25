@@ -250,7 +250,7 @@ static int cal_samples;
 #define SENSOR_STACK_SIZE 2048
 #define SENSOR_PRIORITY 5
 #define SENSOR_PERIOD_MS 100  /* 10 Hz - Kalman predicts between measurements */
-#define CALIBRATION_SAMPLES 3000  /* ~60 seconds at 50 Hz */
+#define CALIBRATION_SAMPLES 300   /* 30 seconds at 10 Hz */
 
 K_THREAD_STACK_DEFINE(sensor_stack, SENSOR_STACK_SIZE);
 static struct k_thread sensor_thread_data;

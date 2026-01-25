@@ -849,6 +849,44 @@ Nach erfolgreichem Pairing speichert der micro:bit die Bond-Informationen persis
 - Long-press Button A während Scan: Scan abbrechen
 - Long-press Button A bei Verbindung: Controller trennen
 
+### Autonomer Navigationsmodus
+
+Der Roboter kann autonom navigieren mit Heading-Hold und IR-basierter Hindernisvermeidung.
+
+**Aktivierung:** D-Pad UP auf dem Xbox Controller
+
+**D-Pad Steuerung (im Autonomous Mode):**
+
+| D-Pad | Aktion | Beschreibung |
+|-------|--------|--------------|
+| **UP** | Aktivieren | Startet Autonomous Mode, kein Effekt wenn bereits aktiv |
+| **DOWN** | 180° U-Turn | Dreht um und fährt zurück |
+| **LEFT** | -90° Drehung | Dreht gegen Uhrzeigersinn |
+| **RIGHT** | +90° Drehung | Dreht im Uhrzeigersinn |
+
+**Wichtig:**
+- D-Pad-Eingaben werden ignoriert während einer Drehung läuft
+- D-Pad deaktiviert **niemals** den Autonomous Mode
+- Nur **Stick/Trigger >10%** = Manual Override = Autonomous Mode beendet
+
+**Zustände:**
+
+| Zustand | Beschreibung |
+|---------|--------------|
+| `HEADING_HOLD` | Fährt vorwärts, hält Ziel-Heading, vermeidet Hindernisse |
+| `TURNING` | Dreht auf neues Ziel-Heading (proportionale Geschwindigkeit) |
+| `BACKING_UP` | Fährt rückwärts (beide IR < 150mm), dann Wegdrehen |
+
+**Hindernisvermeidung (Kalman-gefiltert):**
+- **> 350mm**: Volle Geschwindigkeit (100%), nur Heading-Korrektur
+- **150-350mm**: Proportionale Vermeidung, reduzierte Geschwindigkeit
+- **< 150mm** (beide Seiten): Rückwärtsfahren, dann intelligentes Wegdrehen
+
+**Wegdrehverhalten nach Backup:**
+- Proportionaler Winkel basierend auf IR-Differenz (45°-135°)
+- Mehr Platz rechts → dreht nach rechts
+- Beide Seiten gleich eng → 180° U-Turn
+
 ### BLE Konfiguration
 
 | Parameter | Wert |
@@ -872,6 +910,37 @@ Beispiel: `IMU,12345,2.5,-1.2,180.3\r\n`
 |--------|---------|--------------|
 | `CAL` | `CAL:OK` / `CAL:BUSY` | Magnetometer-Kalibrierung starten |
 | `VER` | `VER:1.0.0-ble` | Firmware-Version abfragen |
+
+### Magnetometer-Kalibrierung
+
+Die Magnetometer-Kalibrierung kompensiert Hard-Iron-Störungen (Offset) durch Metall/Magnete in der Nähe des Sensors.
+
+**Kalibrierung starten:**
+1. **Long-press Button B** (3 Sekunden gedrückt halten)
+2. **30 Sekunden** lang den micro:bit durch alle Orientierungen drehen
+3. Dabei alle Achsen abdecken (wie eine Kugel abrollen)
+4. Kalibrierung wird automatisch im Flash gespeichert
+
+**Serielle Ausgabe während Kalibrierung:**
+```
+CAL,START
+CAL,<sample>,<mx>,<my>,<mz>
+...
+CAL,DONE,<offset_x>,<offset_y>,<offset_z>
+MAG CAL: Saved to flash
+```
+
+**Wichtig:**
+- Kalibrierung wird im Flash persistent gespeichert (überlebt Neustart)
+- **Beim Flashen mit `pyocd erase --chip` geht die Kalibrierung verloren!**
+- Normales Flashen mit `pyocd flash` behält die Kalibrierung (Settings-Partition bleibt)
+- Nach Verlust: Neu kalibrieren mit Long-press Button B
+
+**Kalibrierung via BLE:**
+```
+# Senden: CAL
+# Antwort: CAL:OK (Kalibrierung gestartet) oder CAL:BUSY (läuft bereits)
+```
 
 ### Build & Flash
 

@@ -38,6 +38,9 @@ static volatile bool enabled = false;
 /* Timing for state transitions */
 static int64_t state_start_time;
 
+/* Heading-hold target (degrees, 0-360) */
+static float target_heading;
+
 /* Yaw test tracking */
 static float yaw_test_start_heading;
 static float yaw_test_cw_delta;
@@ -46,6 +49,14 @@ static float yaw_test_ccw_delta;
 /* ============================================================================
  * Helper Functions
  * ============================================================================ */
+
+/**
+ * Absolute value of a float
+ */
+static inline float abs_f(float x)
+{
+    return (x < 0.0f) ? -x : x;
+}
 
 /**
  * Get current heading from IMU sensor data
@@ -69,10 +80,11 @@ static void get_current_orientation(float *roll, float *pitch, float *heading)
 
 /**
  * Calculate heading delta (handles wraparound at 0/360)
+ * Returns the shortest path from current to target.
  */
-static float heading_delta(float start, float end)
+static float heading_delta(float target, float current)
 {
-    float delta = end - start;
+    float delta = target - current;
 
     /* Normalize to -180 to +180 range */
     while (delta > 180.0f) {
@@ -86,47 +98,17 @@ static float heading_delta(float start, float end)
 }
 
 /**
- * Get distance from IR sensors (returns minimum of left/right in mm)
+ * Normalize heading to 0-360 range
  */
-static uint16_t get_obstacle_distance(bool *left_closer, bool *right_closer)
+static float normalize_heading(float heading)
 {
-    uint16_t left_raw, right_raw;
-    ir_sensors_get_raw(&left_raw, &right_raw);
-
-    /* Convert raw IR values to approximate distance
-     * Using the raw_to_mm logic from ir_sensors.c:
-     * Higher raw value = closer obstacle
-     * For simplicity, we'll use a linear approximation here
-     */
-
-    /* Threshold for "close" detection based on raw ADC values
-     * From ir_sensors.c calibration table:
-     * - raw 100 = 550mm
-     * - raw 350 = 350mm
-     * - raw 1050 = 250mm (AUTONAV_OBSTACLE_START)
-     * - raw 3000 = 180mm
-     * - raw 4000 = 100mm
-     */
-
-    /* AUTONAV_OBSTACLE_START (250mm) corresponds to ~raw 1050 */
-    /* AUTONAV_OBSTACLE_CRIT (150mm) corresponds to ~raw 3500 */
-    #define RAW_THRESHOLD_START 800   /* ~300mm - start avoiding */
-    #define RAW_THRESHOLD_CRIT  2000  /* ~200mm - back up */
-
-    *left_closer = (left_raw > right_raw);
-    *right_closer = (right_raw > left_raw);
-
-    /* Return the higher (closer) raw value as a proxy for "closest obstacle" */
-    uint16_t max_raw = (left_raw > right_raw) ? left_raw : right_raw;
-
-    /* Approximate conversion: higher raw = closer
-     * Use inverse relationship similar to ir_sensors.c calibration */
-    if (max_raw >= 3500) return 100;
-    if (max_raw >= 2000) return 150;
-    if (max_raw >= 1050) return 250;
-    if (max_raw >= 350) return 350;
-    if (max_raw >= 100) return 550;
-    return 999;  /* Very far or no obstacle */
+    while (heading >= 360.0f) {
+        heading -= 360.0f;
+    }
+    while (heading < 0.0f) {
+        heading += 360.0f;
+    }
+    return heading;
 }
 
 /**
@@ -137,21 +119,16 @@ static void set_motor_for_state(enum autonav_state state)
     struct motor_cmd cmd = {0};
 
     switch (state) {
-    case AUTONAV_EXPLORING:
+    case AUTONAV_HEADING_HOLD:
+        /* Forward motion - angular handled separately by process_heading_hold */
         cmd.linear = AUTONAV_SPEED_LINEAR;
         cmd.angular = 0;
         break;
 
-    case AUTONAV_AVOIDING_LEFT:
-        /* Obstacle on left, turn right */
+    case AUTONAV_TURNING:
+        /* Turning in place - angular set by process_turning */
         cmd.linear = 0;
-        cmd.angular = AUTONAV_SPEED_ANGULAR;
-        break;
-
-    case AUTONAV_AVOIDING_RIGHT:
-        /* Obstacle on right, turn left */
-        cmd.linear = 0;
-        cmd.angular = -AUTONAV_SPEED_ANGULAR;
+        cmd.angular = 0;
         break;
 
     case AUTONAV_BACKING_UP:
@@ -270,83 +247,264 @@ static void process_yaw_test(void)
 }
 
 /* ============================================================================
- * Autonomous Navigation Logic
+ * Heading-Hold Navigation Logic
  * ============================================================================ */
 
-static void process_navigation(void)
+/**
+ * Clamp a value to a range
+ */
+static inline int16_t clamp_i16(int16_t val, int16_t min, int16_t max)
 {
-    bool left_closer, right_closer;
-    uint16_t distance = get_obstacle_distance(&left_closer, &right_closer);
+    if (val < min) return min;
+    if (val > max) return max;
+    return val;
+}
+
+/**
+ * Process heading-hold state - drive forward while maintaining target heading
+ * Uses Kalman-filtered IR distance for proportional obstacle avoidance
+ */
+static void process_heading_hold(void)
+{
+    /* Get Kalman-filtered distances in mm */
+    float left_mm, right_mm;
+    ir_sensors_get_distance(&left_mm, &right_mm);
+
+    /* Find minimum distance (closest obstacle) */
+    float min_dist = (left_mm < right_mm) ? left_mm : right_mm;
+
+    /* Critical: both sides too close → back up */
+    if (left_mm < OBSTACLE_DIST_CRITICAL && right_mm < OBSTACLE_DIST_CRITICAL) {
+        printk("AUTONAV: Critical! L=%.0f R=%.0f mm, backing up\n",
+               (double)left_mm, (double)right_mm);
+        transition_to(AUTONAV_BACKING_UP);
+        return;
+    }
+
+    /* Calculate base heading correction
+     * Note: positive angular = turn right (CW) = heading decreases
+     *       negative angular = turn left (CCW) = heading increases
+     * If target > current (error > 0), we need CCW to increase heading → negative angular
+     */
+    float current = get_current_heading();
+    float heading_error = heading_delta(target_heading, current);
+    float angular_heading = -heading_error * HEADING_KP;  /* Negate: error>0 needs CCW (negative) */
+
+    /* Debug: Log heading correction every ~1 second */
+    static int debug_counter = 0;
+    if (++debug_counter >= 20) {  /* 20 * 50ms = 1s */
+        debug_counter = 0;
+        printk("HEADING: target=%.1f current=%.1f error=%+.1f angular=%+.1f\n",
+               (double)target_heading, (double)current,
+               (double)heading_error, (double)angular_heading);
+    }
+
+    /* Calculate obstacle avoidance correction */
+    float angular_avoid = 0.0f;
+
+    if (min_dist < OBSTACLE_DIST_AVOID) {
+        /*
+         * Proportional avoidance based on distance difference:
+         * - diff > 0 → right has more space → turn right (positive angular)
+         * - diff < 0 → left has more space → turn left (negative angular)
+         *
+         * Strength increases as obstacle gets closer
+         */
+        float diff = right_mm - left_mm;
+
+        /* Apply deadzone for small differences */
+        if (abs_f(diff) > OBSTACLE_DIFF_DEADZONE) {
+            /* Scale avoidance by proximity (closer = stronger response) */
+            float proximity_factor = 1.0f - (min_dist / OBSTACLE_DIST_AVOID);
+            proximity_factor = (proximity_factor < 0.0f) ? 0.0f : proximity_factor;
+
+            angular_avoid = diff * OBSTACLE_KP_AVOID * (1.0f + proximity_factor);
+
+            printk("AUTONAV: Avoid L=%.0f R=%.0f diff=%+.0f → angular=%+.1f\n",
+                   (double)left_mm, (double)right_mm, (double)diff, (double)angular_avoid);
+        }
+    }
+
+    /* Combine heading hold + obstacle avoidance */
+    float angular_total = angular_heading + angular_avoid;
+    int16_t angular = clamp_i16((int16_t)angular_total,
+                                -AUTONAV_SPEED_ANGULAR, AUTONAV_SPEED_ANGULAR);
+
+    /* Reduce forward speed when avoiding (proportional to avoidance effort) */
+    float speed_factor = 1.0f - (abs_f(angular_avoid) / (float)AUTONAV_SPEED_ANGULAR) * 0.5f;
+    if (speed_factor < 0.3f) speed_factor = 0.3f;
+    int16_t linear = (int16_t)(AUTONAV_SPEED_LINEAR * speed_factor);
+
+    struct motor_cmd cmd = {
+        .linear = linear,
+        .angular = angular,
+    };
+    k_msgq_put(&motor_cmd_q, &cmd, K_NO_WAIT);
+}
+
+/**
+ * Process turning state - rotate in place to reach target heading
+ * Uses proportional control with minimum speed for smooth approach
+ * Also checks for obstacles and enforces timeout
+ */
+static void process_turning(void)
+{
     int64_t elapsed = k_uptime_get() - state_start_time;
 
-    uint16_t left_raw, right_raw;
-    ir_sensors_get_raw(&left_raw, &right_raw);
+    /* Check for timeout (60 seconds) */
+    if (elapsed >= AUTONAV_TURNING_TIMEOUT) {
+        printk("AUTONAV: Turning timeout! Resuming heading-hold\n");
+        target_heading = get_current_heading();  /* Accept current heading */
+        transition_to(AUTONAV_HEADING_HOLD);
+        return;
+    }
 
-    switch (current_state) {
-    case AUTONAV_EXPLORING:
-        /* Check for obstacles while moving forward */
-        if (distance <= AUTONAV_OBSTACLE_CRIT) {
-            /* Very close - back up */
-            printk("AUTONAV: Critical obstacle at %dmm, backing up\n", distance);
-            transition_to(AUTONAV_BACKING_UP);
-        } else if (left_raw > RAW_THRESHOLD_START && right_raw > RAW_THRESHOLD_START) {
-            /* Both sides have obstacles - back up */
-            printk("AUTONAV: Obstacles on both sides, backing up\n");
-            transition_to(AUTONAV_BACKING_UP);
-        } else if (left_raw > RAW_THRESHOLD_START) {
-            /* Obstacle on left - turn right */
-            printk("AUTONAV: Obstacle on left (L=%d), turning right\n", left_raw);
-            transition_to(AUTONAV_AVOIDING_LEFT);
-        } else if (right_raw > RAW_THRESHOLD_START) {
-            /* Obstacle on right - turn left */
-            printk("AUTONAV: Obstacle on right (R=%d), turning left\n", right_raw);
-            transition_to(AUTONAV_AVOIDING_RIGHT);
-        }
-        /* else: continue forward */
-        break;
+    /* Check for critical obstacles using Kalman-filtered IR */
+    float left_mm, right_mm;
+    ir_sensors_get_distance(&left_mm, &right_mm);
 
-    case AUTONAV_AVOIDING_LEFT:
-        /* Turning right to avoid left obstacle */
-        if (elapsed >= AUTONAV_TURN_DURATION) {
-            /* Done turning, check if clear */
-            if (left_raw < RAW_THRESHOLD_START) {
-                printk("AUTONAV: Left clear, resuming exploration\n");
-                transition_to(AUTONAV_EXPLORING);
-            }
-            /* else: continue turning */
-            state_start_time = k_uptime_get();
-        }
-        break;
+    if (left_mm < OBSTACLE_DIST_CRITICAL && right_mm < OBSTACLE_DIST_CRITICAL) {
+        printk("AUTONAV: Critical obstacle while turning! L=%.0f R=%.0f mm\n",
+               (double)left_mm, (double)right_mm);
+        transition_to(AUTONAV_BACKING_UP);
+        return;
+    }
 
-    case AUTONAV_AVOIDING_RIGHT:
-        /* Turning left to avoid right obstacle */
-        if (elapsed >= AUTONAV_TURN_DURATION) {
-            /* Done turning, check if clear */
-            if (right_raw < RAW_THRESHOLD_START) {
-                printk("AUTONAV: Right clear, resuming exploration\n");
-                transition_to(AUTONAV_EXPLORING);
-            }
-            /* else: continue turning */
-            state_start_time = k_uptime_get();
-        }
-        break;
+    float current = get_current_heading();
+    float error = heading_delta(target_heading, current);
 
-    case AUTONAV_BACKING_UP:
-        /* Backing up from obstacle */
-        if (elapsed >= AUTONAV_BACKUP_DURATION) {
-            /* Done backing up, decide which way to turn */
-            if (left_raw <= right_raw) {
-                printk("AUTONAV: Done backing, turning left (right more blocked)\n");
-                transition_to(AUTONAV_AVOIDING_RIGHT);
-            } else {
-                printk("AUTONAV: Done backing, turning right (left more blocked)\n");
-                transition_to(AUTONAV_AVOIDING_LEFT);
-            }
-        }
-        break;
+    /* Check if target reached */
+    if (abs_f(error) < HEADING_TOLERANCE) {
+        printk("AUTONAV: Target heading reached (%.1f)\n", (double)target_heading);
+        transition_to(AUTONAV_HEADING_HOLD);
+        return;
+    }
 
-    default:
-        break;
+    /* Proportional turn rate with minimum speed
+     * Note: error > 0 means target > current, need CCW (negative angular)
+     */
+    float angular_f = -error * TURNING_KP;
+
+    /* Apply minimum speed (maintain sign for direction)
+     * error > 0 → need CCW → negative angular
+     */
+    if (abs_f(angular_f) < TURNING_MIN_SPEED) {
+        angular_f = (error > 0) ? -TURNING_MIN_SPEED : TURNING_MIN_SPEED;
+    }
+
+    int16_t angular = clamp_i16((int16_t)angular_f,
+                                -AUTONAV_SPEED_ANGULAR, AUTONAV_SPEED_ANGULAR);
+
+    struct motor_cmd cmd = {
+        .linear = 0,
+        .angular = angular,
+    };
+    k_msgq_put(&motor_cmd_q, &cmd, K_NO_WAIT);
+}
+
+/* ============================================================================
+ * Backing Up Logic
+ * ============================================================================ */
+
+/**
+ * Calculate proportional turn angle based on Kalman-filtered IR distances
+ *
+ * The turn angle depends on:
+ * 1. Difference between left/right (bigger diff → turn more toward open side)
+ * 2. Tightness of situation (less space → need bigger turn)
+ *
+ * @param left_mm  Kalman-filtered left distance
+ * @param right_mm Kalman-filtered right distance
+ * @return Turn angle in degrees to add to target_heading
+ *         (positive = CCW/left = heading increases, negative = CW/right = heading decreases)
+ */
+static float calculate_turn_angle(float left_mm, float right_mm)
+{
+    float diff = right_mm - left_mm;  /* positive = more space on right */
+    float min_dist = (left_mm < right_mm) ? left_mm : right_mm;
+
+    /* Both sides similar (diff < 50mm) → U-turn */
+    if (abs_f(diff) < 50.0f) {
+        return 180.0f;
+    }
+
+    /*
+     * Proportional turn angle calculation:
+     *
+     * diff_factor (0-1): How much more space on one side
+     *   - 0 = equal space
+     *   - 1 = 400mm+ difference (one side much freer)
+     *
+     * tight_factor (0-1): How tight the situation is
+     *   - 0 = plenty of space (min_dist >= OBSTACLE_DIST_AVOID)
+     *   - 1 = very tight (min_dist = 0)
+     *
+     * Final angle = 45° base + up to 45° for diff + up to 45° for tightness
+     * Range: 45° to 135°
+     */
+    float diff_factor = abs_f(diff) / 400.0f;
+    if (diff_factor > 1.0f) {
+        diff_factor = 1.0f;
+    }
+
+    float tight_factor = 1.0f - (min_dist / OBSTACLE_DIST_AVOID);
+    if (tight_factor < 0.0f) {
+        tight_factor = 0.0f;
+    }
+    if (tight_factor > 1.0f) {
+        tight_factor = 1.0f;
+    }
+
+    /* Calculate angle magnitude: 45° base + proportional components */
+    float turn_angle = 45.0f + diff_factor * 45.0f + tight_factor * 45.0f;
+
+    /* Apply direction:
+     * - More space on right (diff > 0) → turn right (CW) → heading decreases → negative
+     * - More space on left (diff < 0) → turn left (CCW) → heading increases → positive
+     */
+    if (diff > 0.0f) {
+        turn_angle = -turn_angle;
+    }
+
+    return turn_angle;
+}
+
+/**
+ * Process backing up state - reverse from obstacle, then adjust heading
+ * Uses proportional turn angle based on Kalman-filtered IR distances
+ */
+static void process_backing_up(void)
+{
+    int64_t elapsed = k_uptime_get() - state_start_time;
+
+    /* Wait for backup duration */
+    if (elapsed < AUTONAV_BACKUP_DURATION) {
+        return;
+    }
+
+    /* Get Kalman-filtered distance to check if safe */
+    float left_mm, right_mm;
+    ir_sensors_get_distance(&left_mm, &right_mm);
+    float min_dist = (left_mm < right_mm) ? left_mm : right_mm;
+
+    if (min_dist > OBSTACLE_DIST_CRITICAL) {
+        /* Safe to resume - calculate proportional turn angle */
+        float turn_angle = calculate_turn_angle(left_mm, right_mm);
+
+        printk("AUTONAV: Backed up (L=%.0f R=%.0f mm), turn %.0f deg\n",
+               (double)left_mm, (double)right_mm, (double)turn_angle);
+
+        /* Update target heading */
+        target_heading = normalize_heading(target_heading + turn_angle);
+        printk("AUTONAV: New target heading = %.1f\n", (double)target_heading);
+
+        /* Transition to turning to reach new heading */
+        transition_to(AUTONAV_TURNING);
+    } else {
+        /* Still too close, keep backing */
+        printk("AUTONAV: Still blocked (%.0f mm), continuing backup\n",
+               (double)min_dist);
+        state_start_time = k_uptime_get();
     }
 }
 
@@ -377,8 +535,23 @@ static void autonav_thread_fn(void *p1, void *p2, void *p3)
             continue;
         }
 
-        /* Process autonomous navigation */
-        process_navigation();
+        /* Process based on current state */
+        switch (current_state) {
+        case AUTONAV_HEADING_HOLD:
+            process_heading_hold();
+            break;
+
+        case AUTONAV_TURNING:
+            process_turning();
+            break;
+
+        case AUTONAV_BACKING_UP:
+            process_backing_up();
+            break;
+
+        default:
+            break;
+        }
     }
 }
 
@@ -408,10 +581,13 @@ void autonav_enable(void)
         return;  /* Already enabled */
     }
 
-    printk("AUTONAV: Enabled\n");
+    /* Capture current heading as target */
+    target_heading = get_current_heading();
+
+    printk("AUTONAV: Enabled, target heading=%.1f\n", (double)target_heading);
     enabled = true;
     audio_play(SOUND_PAIRING_START);  /* Ascending tone */
-    transition_to(AUTONAV_EXPLORING);
+    transition_to(AUTONAV_HEADING_HOLD);
 }
 
 void autonav_disable(void)
@@ -492,4 +668,32 @@ void autonav_manual_override(void)
     printk("AUTONAV: Manual override detected!\n");
     autonav_disable();
     audio_play(SOUND_OBSTACLE);  /* Warning beep */
+}
+
+void autonav_turn_relative(int16_t degrees)
+{
+    if (!enabled) {
+        printk("AUTONAV: Turn ignored (not enabled)\n");
+        return;
+    }
+
+    /* Update target heading */
+    target_heading = normalize_heading(target_heading + (float)degrees);
+
+    printk("AUTONAV: Turn %+d degrees, new target=%.1f\n",
+           degrees, (double)target_heading);
+
+    /* Transition to turning state */
+    audio_play(SOUND_BUTTON_PRESS);
+    transition_to(AUTONAV_TURNING);
+}
+
+float autonav_get_target_heading(void)
+{
+    if (!enabled ||
+        (current_state != AUTONAV_HEADING_HOLD &&
+         current_state != AUTONAV_TURNING)) {
+        return -1.0f;
+    }
+    return target_heading;
 }

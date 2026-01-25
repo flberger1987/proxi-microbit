@@ -24,9 +24,8 @@ enum autonav_state {
     AUTONAV_YAW_TEST_CW,        /* Yaw test: rotating clockwise */
     AUTONAV_YAW_TEST_CCW,       /* Yaw test: rotating counter-clockwise */
     AUTONAV_YAW_TEST_DONE,      /* Yaw test: complete, showing results */
-    AUTONAV_EXPLORING,          /* Moving forward, looking for obstacles */
-    AUTONAV_AVOIDING_LEFT,      /* Turning right (obstacle on left) */
-    AUTONAV_AVOIDING_RIGHT,     /* Turning left (obstacle on right) */
+    AUTONAV_HEADING_HOLD,       /* Driving forward, holding target heading */
+    AUTONAV_TURNING,            /* Turning to new target heading */
     AUTONAV_BACKING_UP,         /* Reversing (both sides blocked) */
 };
 
@@ -35,17 +34,27 @@ enum autonav_state {
  * ============================================================================ */
 
 /* Motor speeds for autonomous navigation */
-#define AUTONAV_SPEED_LINEAR     50   /* Forward/backward speed */
+#define AUTONAV_SPEED_LINEAR     100  /* Forward speed (100%) */
 #define AUTONAV_SPEED_ANGULAR    60   /* Turn speed */
-#define AUTONAV_SPEED_BACKUP    -40   /* Backup speed */
+#define AUTONAV_SPEED_BACKUP    -50   /* Backup speed */
 
-/* Obstacle detection thresholds (mm) */
-#define AUTONAV_OBSTACLE_START   250  /* Start avoiding at this distance */
-#define AUTONAV_OBSTACLE_CRIT    150  /* Back up at this distance */
+/* Heading control parameters */
+#define HEADING_KP               1.5f /* Proportional gain for heading correction */
+#define HEADING_TOLERANCE        5.0f /* Target reached when error < this (degrees) */
+
+/* Turning control parameters (in-place rotation to target heading) */
+#define TURNING_KP               0.67f /* Proportional gain: 90° error → 60% speed */
+#define TURNING_MIN_SPEED        25    /* Minimum angular speed (~20°/s) */
+
+/* Obstacle avoidance parameters (using Kalman-filtered mm distance) */
+#define OBSTACLE_DIST_CRITICAL   150.0f  /* Back up if closer than this (mm) */
+#define OBSTACLE_DIST_AVOID      350.0f  /* Start avoiding if closer than this (mm) */
+#define OBSTACLE_KP_AVOID        0.3f    /* Proportional gain for avoidance (angular/mm) */
+#define OBSTACLE_DIFF_DEADZONE   30.0f   /* Ignore small differences (mm) */
 
 /* Timing (ms) */
-#define AUTONAV_BACKUP_DURATION  500  /* How long to back up */
-#define AUTONAV_TURN_DURATION    800  /* How long to turn */
+#define AUTONAV_BACKUP_DURATION  500   /* How long to back up */
+#define AUTONAV_TURNING_TIMEOUT  60000 /* Max time for turning (60 sec) */
 #define AUTONAV_YAW_TEST_DURATION 5000 /* Duration of each yaw test phase (5 sec) */
 
 /* Yaw test speed (100% for clear measurements) */
@@ -111,5 +120,20 @@ bool autonav_is_yaw_test_running(void);
  * Called when manual input is detected during autonomous mode
  */
 void autonav_manual_override(void);
+
+/**
+ * Initiate a relative turn by the specified degrees
+ * Only effective when autonomous mode is enabled.
+ *
+ * @param degrees Relative turn amount (+90 for left/CCW, -90 for right/CW, 180 for U-turn)
+ */
+void autonav_turn_relative(int16_t degrees);
+
+/**
+ * Get the current target heading
+ *
+ * @return Target heading in degrees (0-360), or -1 if not in heading-hold mode
+ */
+float autonav_get_target_heading(void);
 
 #endif /* AUTONOMOUS_NAV_H */
