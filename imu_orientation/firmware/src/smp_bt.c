@@ -10,6 +10,7 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/settings/settings.h>
 
 /* Track connection state */
 static struct bt_conn *current_conn;
@@ -84,6 +85,15 @@ int smp_bt_init(void)
     }
 
     printk("BLE: Bluetooth initialized\n");
+
+    /* Load persistent settings (including bond info) */
+    err = settings_load();
+    if (err) {
+        printk("BLE: settings_load failed (err %d)\n", err);
+        /* Continue anyway - bonding just won't be persistent */
+    } else {
+        printk("BLE: Persistent settings loaded\n");
+    }
 
     /* Start advertising */
     err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),

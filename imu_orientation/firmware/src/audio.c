@@ -34,6 +34,12 @@ static const struct pwm_dt_spec speaker = {0};
 
 /* Audio state */
 static volatile bool is_playing = false;
+static volatile bool is_muted = false;  /* Mutes regular sounds during calibration */
+
+/* Proximity beep state (parking sensor style) */
+static volatile bool proximity_enabled = false;
+static volatile uint16_t proximity_value = 0;  /* 0=far, 100=close */
+static volatile int64_t last_beep_time = 0;
 
 /* ============================================================================
  * Internal Functions
@@ -179,6 +185,28 @@ static void play_machinegun(void)
     is_playing = false;
 }
 
+/**
+ * Calibration beep - short high-pitched tick
+ */
+static void play_calibration_beep(void)
+{
+    set_tone(NOTE_E5);
+    is_playing = true;
+    k_msleep(50);
+    set_tone(0);
+    is_playing = false;
+}
+
+/**
+ * Calibration done - success jingle (ascending fanfare)
+ */
+static void play_calibration_done(void)
+{
+    static const uint16_t notes[] = {NOTE_C5, NOTE_E5, NOTE_G5, NOTE_C5, 0, NOTE_G5, NOTE_C5};
+    static const uint16_t durations[] = {100, 100, 100, 150, 50, 100, 300};
+    play_melody(notes, durations, ARRAY_SIZE(notes));
+}
+
 /* ============================================================================
  * Audio Thread
  * ============================================================================ */
@@ -227,6 +255,12 @@ static void audio_thread_fn(void *p1, void *p2, void *p3)
         case SOUND_MACHINEGUN:
             play_machinegun();
             break;
+        case SOUND_CALIBRATION_BEEP:
+            play_calibration_beep();
+            break;
+        case SOUND_CALIBRATION_DONE:
+            play_calibration_done();
+            break;
         case SOUND_NONE:
         default:
             break;
@@ -263,8 +297,29 @@ void audio_start_thread(void)
 
 void audio_play(enum sound_event event)
 {
+    /* When muted, only allow calibration sounds */
+    if (is_muted &&
+        event != SOUND_CALIBRATION_BEEP &&
+        event != SOUND_CALIBRATION_DONE) {
+        return;
+    }
+
     /* Non-blocking send to audio queue */
     k_msgq_put(&sound_q, &event, K_NO_WAIT);
+}
+
+void audio_set_muted(bool muted)
+{
+    is_muted = muted;
+    if (muted) {
+        /* Stop any currently playing sound when entering mute */
+        audio_stop();
+    }
+}
+
+bool audio_is_muted(void)
+{
+    return is_muted;
 }
 
 void audio_tone(uint32_t frequency_hz, uint32_t duration_ms)
@@ -285,4 +340,74 @@ void audio_stop(void)
 bool audio_is_playing(void)
 {
     return is_playing;
+}
+
+void audio_proximity_enable(bool enable)
+{
+    proximity_enabled = enable;
+    if (!enable) {
+        set_tone(0);  /* Silence when disabled */
+        proximity_value = 0;
+    }
+    printk("Audio: Proximity beep %s\n", enable ? "enabled" : "disabled");
+}
+
+void audio_proximity_set(uint16_t proximity_pct)
+{
+    if (!proximity_enabled) {
+        return;
+    }
+
+    /* Clamp to 0-100 */
+    if (proximity_pct > 100) {
+        proximity_pct = 100;
+    }
+    proximity_value = proximity_pct;
+
+    /*
+     * Calculate beep interval:
+     * - 0% → silence (no beep!)
+     * - 1-94% → 1000ms down to 80ms interval
+     * - 95-100% → continuous tone
+     */
+    int64_t now = k_uptime_get();
+
+    /* 0% = silence */
+    if (proximity_pct == 0) {
+        if (is_playing) {
+            set_tone(0);
+            is_playing = false;
+        }
+        return;
+    }
+
+    /* 95%+ = continuous tone */
+    if (proximity_pct >= 95) {
+        if (!is_playing) {
+            set_tone(NOTE_A4);
+            is_playing = true;
+        }
+        last_beep_time = now;
+        return;
+    }
+
+    /* 1-94% = interval beeping */
+    /* Linear: 1000ms at 1%, 80ms at 94% */
+    uint32_t interval_ms = 1000 - ((proximity_pct - 1) * 920) / 93;
+
+    /* Turn off continuous tone if we moved away */
+    if (is_playing) {
+        set_tone(0);
+        is_playing = false;
+    }
+
+    /* Check if it's time for next beep */
+    int64_t elapsed = now - last_beep_time;
+    if (elapsed >= interval_ms) {
+        /* Short beep: 18ms tone */
+        set_tone(NOTE_A4);
+        k_msleep(18);
+        set_tone(0);
+        last_beep_time = now;
+    }
 }

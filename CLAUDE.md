@@ -799,6 +799,7 @@ Die aktuelle Firmware (`imu_orientation/firmware/`) implementiert:
 - **Mahony AHRS Filter** für stabile Roll/Pitch/Heading Berechnung
 - **BLE Streaming** via Nordic UART Service (NUS)
 - **Xbox Wireless Controller** Unterstützung via BLE HID
+- **BLE Auto-Reconnect** mit persistentem Bonding (überlebt Neustart)
 - **Pulsierende Herz-Animation** auf dem 5x5 LED Display im Idle-Zustand
 
 ### Xbox Controller Integration
@@ -817,7 +818,36 @@ Der micro:bit agiert als BLE Central und verbindet sich mit einem Xbox Wireless 
 | System (View/Menu/Xbox) | ✓ |
 | Stick Clicks (L3/R3) | ✓ |
 
-**Pairing:** Button A auf micro:bit drücken um Pairing-Modus zu starten.
+**Pairing:** Button A (long press 1s) auf micro:bit drücken um Pairing-Modus zu starten.
+
+### BLE Auto-Reconnect (Implementiert 2025-01-25)
+
+Nach erfolgreichem Pairing speichert der micro:bit die Bond-Informationen persistent im Flash. Die automatische Wiederverbindung funktioniert wie folgt:
+
+**Nach Neustart des micro:bit:**
+1. Bond-Info wird aus Flash geladen
+2. Scan startet automatisch → drehender Punkt (30s)
+3. Wenn Controller gefunden → automatische Verbindung
+4. Wenn Timeout → Herz-Animation (10s Pause) → erneuter Scan
+
+**Bei Verbindungsabbruch (Controller aus/Reichweite):**
+1. Disconnect erkannt → Herz-Animation
+2. Nach 2s: Scan startet → drehender Punkt
+3. Wenn Controller wieder eingeschaltet → automatische Verbindung
+4. Wenn Timeout → Herz (10s) → Retry
+
+**Display-Zustände:**
+| Animation | Bedeutung |
+|-----------|-----------|
+| ❤️ Pulsierendes Herz | Idle - wartet auf Controller |
+| 🔄 Drehender Punkt | Scanning - sucht Controller |
+| 👀 Blinkende Augen | Connected - Controller verbunden |
+| ➡️ Pfeil | Autonomous Mode aktiv |
+
+**Manuelles Eingreifen:**
+- Long-press Button A im Idle-Zustand: Neuen Scan starten
+- Long-press Button A während Scan: Scan abbrechen
+- Long-press Button A bei Verbindung: Controller trennen
 
 ### BLE Konfiguration
 

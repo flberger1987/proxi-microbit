@@ -34,6 +34,8 @@
 #include "motor_driver.h"
 #include "audio.h"
 #include "motor_test.h"
+#include "ir_sensors.h"
+#include "autonomous_nav.h"
 
 /* ============================================================================
  * Display Animations
@@ -123,6 +125,74 @@ static const struct mb_image eyes_animation[] = {
     ),
 };
 
+/* Calibration animation - rotating compass needle */
+static const struct mb_image calibration_animation[] = {
+    /* North */
+    MB_IMAGE(
+        { 0, 0, 1, 0, 0 },
+        { 0, 0, 1, 0, 0 },
+        { 0, 0, 1, 0, 0 },
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0 }
+    ),
+    /* NE */
+    MB_IMAGE(
+        { 0, 0, 0, 1, 0 },
+        { 0, 0, 1, 0, 0 },
+        { 0, 1, 0, 0, 0 },
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0 }
+    ),
+    /* East */
+    MB_IMAGE(
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0 },
+        { 1, 1, 1, 0, 0 },
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0 }
+    ),
+    /* SE */
+    MB_IMAGE(
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0 },
+        { 0, 1, 0, 0, 0 },
+        { 0, 0, 1, 0, 0 },
+        { 0, 0, 0, 1, 0 }
+    ),
+    /* South */
+    MB_IMAGE(
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 1, 0, 0 },
+        { 0, 0, 1, 0, 0 },
+        { 0, 0, 1, 0, 0 }
+    ),
+    /* SW */
+    MB_IMAGE(
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 1, 0 },
+        { 0, 0, 1, 0, 0 },
+        { 0, 1, 0, 0, 0 }
+    ),
+    /* West */
+    MB_IMAGE(
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 1, 1, 1 },
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0 }
+    ),
+    /* NW */
+    MB_IMAGE(
+        { 0, 1, 0, 0, 0 },
+        { 0, 0, 1, 0, 0 },
+        { 0, 0, 0, 1, 0 },
+        { 0, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0 }
+    ),
+};
+
 /* Error X mark */
 static const struct mb_image img_error = MB_IMAGE(
     { 1, 0, 0, 0, 1 },
@@ -141,6 +211,71 @@ static const struct mb_image img_check = MB_IMAGE(
     { 0, 1, 0, 0, 0 }
 );
 
+/* Empty frame for blinking */
+static const struct mb_image img_blank = MB_IMAGE(
+    { 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0 }
+);
+
+/* Face emoji: Smile (Button A) */
+static const struct mb_image face_smile = MB_IMAGE(
+    { 0, 1, 0, 1, 0 },
+    { 0, 1, 0, 1, 0 },
+    { 0, 0, 0, 0, 0 },
+    { 1, 0, 0, 0, 1 },
+    { 0, 1, 1, 1, 0 }
+);
+
+/* Face emoji: Wink (Button B) */
+static const struct mb_image face_wink = MB_IMAGE(
+    { 0, 1, 0, 1, 0 },
+    { 0, 1, 0, 0, 0 },
+    { 0, 0, 0, 0, 0 },
+    { 1, 0, 0, 0, 1 },
+    { 0, 1, 1, 1, 0 }
+);
+
+/* Face emoji: Surprised (Button X) */
+static const struct mb_image face_surprised = MB_IMAGE(
+    { 0, 1, 0, 1, 0 },
+    { 0, 1, 0, 1, 0 },
+    { 0, 0, 0, 0, 0 },
+    { 0, 1, 1, 1, 0 },
+    { 0, 1, 1, 1, 0 }
+);
+
+/* Face emoji: Frown (Button Y) */
+static const struct mb_image face_frown = MB_IMAGE(
+    { 0, 1, 0, 1, 0 },
+    { 0, 1, 0, 1, 0 },
+    { 0, 0, 0, 0, 0 },
+    { 0, 1, 1, 1, 0 },
+    { 1, 0, 0, 0, 1 }
+);
+
+/* Arrow animation for autonomous mode (forward arrow) */
+static const struct mb_image arrow_animation[] = {
+    /* Frame 1: Small arrow */
+    MB_IMAGE(
+        { 0, 0, 1, 0, 0 },
+        { 0, 1, 1, 1, 0 },
+        { 1, 0, 1, 0, 1 },
+        { 0, 0, 1, 0, 0 },
+        { 0, 0, 1, 0, 0 }
+    ),
+    /* Frame 2: Large arrow */
+    MB_IMAGE(
+        { 0, 0, 1, 0, 0 },
+        { 0, 0, 1, 0, 0 },
+        { 0, 1, 1, 1, 0 },
+        { 1, 0, 1, 0, 1 },
+        { 0, 0, 1, 0, 0 }
+    ),
+};
+
 /* ============================================================================
  * Global State
  * ============================================================================ */
@@ -154,9 +289,72 @@ static volatile int64_t button_a_press_time;
 static volatile bool button_a_pressed;
 static volatile bool long_press_triggered;
 
+/* Button B long press for IR calibration */
+static volatile int64_t button_b_press_time;
+static volatile bool button_b_pressed;
+static volatile bool button_b_long_press_triggered;
+
+/* Temporary emoji display (flashing for button feedback)
+ * Note: Accessed from BLE callback (write) and main loop (read).
+ * Race condition is benign - worst case is a single frame delay. */
+#define EMOJI_DISPLAY_MS    2000  /* Total display time: 2 seconds */
+#define EMOJI_FLASH_MS      250   /* Flash interval: 250ms */
+static int64_t emoji_start_time;
+static const struct mb_image *current_emoji;
+static bool emoji_visible;
+
 /* ============================================================================
  * Display Update
  * ============================================================================ */
+
+/**
+ * Start displaying a flashing emoji overlay.
+ * The emoji will flash (250ms on/off) for 2 seconds.
+ * Called from BLE callback, display update happens in main loop.
+ */
+static void start_emoji_flash(const struct mb_image *emoji)
+{
+    emoji_start_time = k_uptime_get();
+    current_emoji = emoji;
+    emoji_visible = true;
+}
+
+/**
+ * Update the flashing emoji display.
+ * Returns true if emoji is still active, false if finished.
+ */
+static bool update_emoji_flash(void)
+{
+    if (current_emoji == NULL) {
+        return false;
+    }
+
+    int64_t elapsed = k_uptime_get() - emoji_start_time;
+
+    /* Check if emoji display time is over */
+    if (elapsed >= EMOJI_DISPLAY_MS) {
+        current_emoji = NULL;
+        emoji_visible = false;
+        current_display_state = -1;  /* Force display state refresh */
+        return false;
+    }
+
+    /* Calculate flash phase (250ms intervals) */
+    bool should_be_visible = ((elapsed / EMOJI_FLASH_MS) % 2) == 0;
+
+    if (should_be_visible != emoji_visible) {
+        emoji_visible = should_be_visible;
+        if (emoji_visible) {
+            mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, SYS_FOREVER_MS,
+                             current_emoji, 1);
+        } else {
+            mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, SYS_FOREVER_MS,
+                             &img_blank, 1);
+        }
+    }
+
+    return true;
+}
 
 static void update_display_for_state(enum robot_state state)
 {
@@ -180,6 +378,11 @@ static void update_display_for_state(enum robot_state state)
     case ROBOT_STATE_CONNECTED:
         mb_display_image(disp, MB_DISPLAY_MODE_DEFAULT | MB_DISPLAY_FLAG_LOOP,
                          500, eyes_animation, ARRAY_SIZE(eyes_animation));
+        break;
+
+    case ROBOT_STATE_AUTONOMOUS:
+        mb_display_image(disp, MB_DISPLAY_MODE_DEFAULT | MB_DISPLAY_FLAG_LOOP,
+                         300, arrow_animation, ARRAY_SIZE(arrow_animation));
         break;
     }
 }
@@ -205,6 +408,7 @@ static void on_controller_disconnected(void)
 
 /* Previous button state for edge detection */
 static uint16_t prev_controller_buttons = 0;
+static uint8_t prev_dpad = XBOX_DPAD_NONE;
 
 static void on_controller_input(const uint8_t *data, uint16_t len)
 {
@@ -219,28 +423,84 @@ static void on_controller_input(const uint8_t *data, uint16_t len)
     /* Detect button press edges (just pressed this frame) */
     uint16_t just_pressed = (input.buttons ^ prev_controller_buttons) & input.buttons;
 
-    /* A button (Cross on PS5) → Shoot sound! */
+    /* Detect D-Pad edges (just pressed this frame) */
+    bool dpad_changed = (input.dpad != prev_dpad);
+    bool dpad_up_pressed = dpad_changed && (input.dpad == XBOX_DPAD_UP);
+    bool dpad_down_pressed = dpad_changed && (input.dpad == XBOX_DPAD_DOWN);
+
+    /* ========== Manual Override Detection ========== */
+    if (autonav_is_enabled()) {
+        /* Check for manual input that should override autonomous mode:
+         * - Any stick movement outside deadzone
+         * - Any trigger > 10%
+         * - Emergency stop combo
+         */
+        int16_t stick_deadzone = HID_DEFAULT_DEADZONE;
+        bool stick_active = (hid_apply_deadzone(input.left_stick_y, stick_deadzone) != 0) ||
+                           (hid_apply_deadzone(input.right_stick_y, stick_deadzone) != 0);
+        bool trigger_active = (input.left_trigger > HID_TRIGGER_THRESHOLD) ||
+                             (input.right_trigger > HID_TRIGGER_THRESHOLD);
+        bool emergency_stop = ((input.buttons & (XBOX_BTN_LB | XBOX_BTN_RB)) == (XBOX_BTN_LB | XBOX_BTN_RB)) ||
+                             ((input.buttons & (XBOX_BTN_LSTICK | XBOX_BTN_RSTICK)) == (XBOX_BTN_LSTICK | XBOX_BTN_RSTICK));
+
+        if (stick_active || trigger_active || emergency_stop) {
+            autonav_manual_override();
+        }
+    }
+
+    /* ========== D-Pad Handling ========== */
+    /* D-Pad UP: Toggle autonomous navigation */
+    if (dpad_up_pressed) {
+        if (autonav_is_enabled()) {
+            autonav_disable();
+            robot_set_state(ROBOT_STATE_CONNECTED);
+        } else {
+            autonav_enable();
+            robot_set_state(ROBOT_STATE_AUTONOMOUS);
+        }
+    }
+
+    /* D-Pad DOWN: Start yaw test (only when autonomous mode is off) */
+    if (dpad_down_pressed && !autonav_is_enabled() && !autonav_is_yaw_test_running()) {
+        autonav_start_yaw_test();
+    }
+
+    /* Update previous D-Pad state */
+    prev_dpad = input.dpad;
+
+    /* ========== Face Button Handling ========== */
+    /* A button (Cross on PS5) → Shoot sound + Smile face! */
     if (just_pressed & XBOX_BTN_A) {
         audio_play(SOUND_SHOOT);
+        start_emoji_flash(&face_smile);
     }
 
-    /* B button (Circle on PS5) → Click sound */
+    /* B button (Circle on PS5) → Click sound + Wink face */
     if (just_pressed & XBOX_BTN_B) {
         audio_play(SOUND_BUTTON_PRESS);
+        start_emoji_flash(&face_wink);
     }
 
-    /* X button (Square on PS5) → Machine gun! */
+    /* X button (Square on PS5) → Machine gun + Surprised face! */
     if (just_pressed & XBOX_BTN_X) {
         audio_play(SOUND_MACHINEGUN);
+        start_emoji_flash(&face_surprised);
     }
 
-    /* Y button (Triangle on PS5) → Obstacle warning */
+    /* Y button (Triangle on PS5) → Obstacle warning + Frown face */
     if (just_pressed & XBOX_BTN_Y) {
         audio_play(SOUND_OBSTACLE);
+        start_emoji_flash(&face_frown);
     }
 
     /* Update previous button state */
     prev_controller_buttons = input.buttons;
+
+    /* ========== Motor Control ========== */
+    /* Skip sending motor commands if in autonomous mode or yaw test (autonav controls motors) */
+    if (autonav_is_enabled() || autonav_is_yaw_test_running()) {
+        return;
+    }
 
     /* Convert to motor command */
     hid_input_to_motor_cmd(&input, &cmd);
@@ -306,15 +566,28 @@ static void button_cb(struct input_event *evt, void *user_data)
         }
     }
 
-    /* Button B handling */
-    if (evt->code == INPUT_KEY_B && evt->value == 1) {
-        /* Reserved for future use */
-        audio_play(SOUND_BUTTON_PRESS);
+    /* Button B handling - short press cycles GPIO test, long press toggles mode */
+    if (evt->code == INPUT_KEY_B) {
+        if (evt->value == 1) {
+            /* Button pressed */
+            button_b_pressed = true;
+            button_b_press_time = k_uptime_get();
+            button_b_long_press_triggered = false;
+        } else {
+            /* Button released */
+            button_b_pressed = false;
 
-        /* For testing: Emergency stop */
-        if (robot_get_state() == ROBOT_STATE_CONNECTED) {
-            motor_emergency_stop();
-            printk("Emergency stop triggered\n");
+            if (!button_b_long_press_triggered) {
+                audio_play(SOUND_BUTTON_PRESS);
+
+                /* Short press - cycle GPIO in test mode, else emergency stop */
+                if (ir_sensors_gpio_test_active()) {
+                    ir_sensors_gpio_test_next();
+                } else if (robot_get_state() == ROBOT_STATE_CONNECTED) {
+                    motor_emergency_stop();
+                    printk("Emergency stop triggered\n");
+                }
+            }
         }
     }
 }
@@ -322,10 +595,14 @@ static void button_cb(struct input_event *evt, void *user_data)
 INPUT_CALLBACK_DEFINE(NULL, button_cb, NULL);
 
 /* ============================================================================
- * Calibration (from original IMU firmware)
+ * Calibration State
  * ============================================================================ */
 
 static volatile bool was_calibrating = false;
+static int64_t last_calibration_beep_time = 0;
+static int calibration_animation_frame = 0;
+#define CALIBRATION_BEEP_INTERVAL_MS 5000  /* Beep every 5 seconds */
+#define CALIBRATION_ANIM_INTERVAL_MS 500   /* Animation frame every 500ms */
 
 /* ============================================================================
  * Main Function
@@ -340,8 +617,11 @@ int main(void)
     printk("  Kosmos Proxi - Xbox Controller RC\n");
     printk("=====================================\n");
     printk("micro:bit v2 + Kosmos Proxi Robot\n");
-    printk("Long-press Button A to pair controller\n");
-    printk("Button B: Emergency stop\n\n");
+    printk("Long-press Button A: Pair controller\n");
+    printk("Short-press Button B: Emergency stop\n");
+    printk("Long-press Button B: Magnetometer calibration (60s)\n");
+    printk("D-Pad UP: Toggle autonomous mode\n");
+    printk("D-Pad DOWN: Start yaw test\n\n");
 
     /* Get display */
     disp = mb_display_get();
@@ -402,6 +682,18 @@ int main(void)
         printk("WARNING: Motor test init failed (err %d)\n", ret);
     }
 
+    /* Initialize IR sensors */
+    ret = ir_sensors_init();
+    if (ret != 0) {
+        printk("WARNING: IR sensors init failed (err %d)\n", ret);
+    }
+
+    /* Initialize autonomous navigation */
+    ret = autonav_init();
+    if (ret != 0) {
+        printk("WARNING: Autonomous nav init failed (err %d)\n", ret);
+    }
+
     /* Start all threads */
     sensors_start_thread();
     serial_output_start_thread();
@@ -410,6 +702,8 @@ int main(void)
     motor_driver_start_thread();
     audio_start_thread();
     motor_test_start_thread();
+    ir_sensors_start_thread();
+    autonav_start_thread();
 
     printk("All threads started.\n");
 
@@ -424,13 +718,19 @@ int main(void)
     /* Play startup sound */
     audio_play(SOUND_CONNECTED);
 
-    printk("Ready. Waiting for controller pairing...\n\n");
+    /* Try to auto-reconnect to bonded controller */
+    if (ble_central_has_bonded_controller()) {
+        printk("Found bonded controller, starting auto-reconnect...\n");
+        ble_central_start_reconnect();
+    } else {
+        printk("Ready. Waiting for controller pairing...\n\n");
+    }
 
     /* Main loop - monitor state and handle long press */
     while (1) {
         k_msleep(50);
 
-        /* Check for long press on Button A */
+        /* Check for long press on Button A (pairing) */
         if (button_a_pressed && !long_press_triggered) {
             int64_t elapsed = k_uptime_get() - button_a_press_time;
             if (elapsed >= LONG_PRESS_MS) {
@@ -439,20 +739,89 @@ int main(void)
             }
         }
 
-        /* Update display based on robot state */
-        enum robot_state state = robot_get_state();
-        update_display_for_state(state);
+        /* Check for long press on Button B (Magnetometer calibration) */
+        if (button_b_pressed && !button_b_long_press_triggered) {
+            int64_t elapsed = k_uptime_get() - button_b_press_time;
+            if (elapsed >= LONG_PRESS_MS) {
+                button_b_long_press_triggered = true;
 
-        /* Handle sensor calibration (legacy feature) */
-        if (was_calibrating && !sensors_is_calibrating()) {
-            was_calibrating = false;
-            /* Show checkmark briefly then return to current state */
-            mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, 1000, &img_check, 1);
-            k_msleep(1000);
-            current_display_state = ROBOT_STATE_IDLE;  /* Force display update */
+                /* Toggle magnetometer calibration */
+                if (sensors_is_calibrating()) {
+                    /* Already calibrating - can't stop early, just notify */
+                    printk("Magnetometer calibration in progress...\n");
+                } else {
+                    /* Start magnetometer calibration (60 seconds) */
+                    printk("Starting magnetometer calibration (60s)...\n");
+                    printk("Slowly rotate the device in ALL directions!\n");
+                    sensors_start_calibration();
+                    audio_play(SOUND_PAIRING_START);
+                }
+            }
         }
-        if (sensors_is_calibrating() && !was_calibrating) {
-            was_calibrating = true;
+
+        /* Sync display state with autonomous navigation */
+        if (robot_is_controller_connected()) {
+            if (autonav_is_enabled() && robot_get_state() != ROBOT_STATE_AUTONOMOUS) {
+                robot_set_state(ROBOT_STATE_AUTONOMOUS);
+            } else if (!autonav_is_enabled() && robot_get_state() == ROBOT_STATE_AUTONOMOUS) {
+                robot_set_state(ROBOT_STATE_CONNECTED);
+            }
+        }
+
+        /* Update flashing emoji (if active) or normal display state */
+        /* Skip display update during calibration (handled separately) */
+        if (!sensors_is_calibrating() && !update_emoji_flash()) {
+            /* No emoji active, update display based on robot state */
+            enum robot_state state = robot_get_state();
+            update_display_for_state(state);
+        }
+
+        /* Handle magnetometer calibration */
+        bool is_calibrating = sensors_is_calibrating();
+
+        if (is_calibrating) {
+            if (!was_calibrating) {
+                /* Calibration just started */
+                was_calibrating = true;
+                audio_set_muted(true);  /* Mute other sounds */
+                last_calibration_beep_time = k_uptime_get();
+                calibration_animation_frame = 0;
+                printk("Calibration started - muting other sounds\n");
+
+                /* Show first animation frame */
+                mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, SYS_FOREVER_MS,
+                                 &calibration_animation[0], 1);
+            }
+
+            /* Update animation (rotating compass needle) */
+            int64_t now = k_uptime_get();
+            static int64_t last_anim_time = 0;
+            if (now - last_anim_time >= CALIBRATION_ANIM_INTERVAL_MS) {
+                last_anim_time = now;
+                calibration_animation_frame = (calibration_animation_frame + 1) %
+                                              ARRAY_SIZE(calibration_animation);
+                mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, SYS_FOREVER_MS,
+                                 &calibration_animation[calibration_animation_frame], 1);
+            }
+
+            /* Periodic beep during calibration */
+            if (now - last_calibration_beep_time >= CALIBRATION_BEEP_INTERVAL_MS) {
+                last_calibration_beep_time = now;
+                audio_play(SOUND_CALIBRATION_BEEP);
+            }
+        } else if (was_calibrating) {
+            /* Calibration just finished */
+            was_calibrating = false;
+            audio_set_muted(false);  /* Unmute sounds */
+            printk("Calibration complete - unmuting sounds\n");
+
+            /* Play success sound */
+            audio_play(SOUND_CALIBRATION_DONE);
+
+            /* Show checkmark briefly then return to current state */
+            mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, 1500, &img_check, 1);
+            k_msleep(1500);
+            current_display_state = -1;  /* Force display update */
         }
     }
 

@@ -11,6 +11,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/settings/settings.h>
 
 #include <math.h>
 
@@ -29,13 +30,75 @@ static struct mahony_filter ahrs_filter;
 #define MAHONY_KP  10.0f  /* Proportional gain (high for no-gyro mode) */
 #define MAHONY_KI  0.0f   /* Integral gain (disabled, no gyro drift) */
 
-/* Calibration state */
+/* Low-pass filter coefficient for output smoothing
+ * alpha = 1.0: no filtering (raw values)
+ * alpha = 0.1: heavy filtering (slow response)
+ */
+#define LPF_ALPHA_ROLL    0.08f  /* Strong filtering for roll (accelerometer noise) */
+#define LPF_ALPHA_PITCH   0.08f  /* Strong filtering for pitch (accelerometer noise) */
+#define LPF_ALPHA_HEADING 0.15f  /* Heading smoothing (magnetometer is cleaner) */
+#define LPF_ALPHA_YAW_RATE 0.1f  /* Yaw rate smoothing */
+
+/* Filtered orientation values */
+static float filtered_roll = 0.0f;
+static float filtered_pitch = 0.0f;
+static float filtered_heading = 0.0f;
+static float filtered_yaw_rate = 0.0f;  /* Degrees per second */
+
+/* Yaw rate calculation with longer time base (~60ms = 3 samples at 50Hz)
+ * This reduces noise in the derivative */
+#define YAW_RATE_SAMPLES 3
+static float heading_history[YAW_RATE_SAMPLES];
+static int heading_history_idx = 0;
+static bool heading_history_full = false;
+
+static bool filter_initialized = false;
+
+/* Calibration state - will be populated by calibration routine or loaded from flash */
 static struct mag_calibration mag_cal = {
     .offset_x = 0.0f,
     .offset_y = 0.0f,
     .offset_z = 0.0f,
     .valid = false
 };
+
+/* ============================================================================
+ * Persistent Storage for Magnetometer Calibration
+ * ============================================================================ */
+
+static int mag_cal_settings_set(const char *name, size_t len,
+                                 settings_read_cb read_cb, void *cb_arg)
+{
+    const char *next;
+    int rc;
+
+    if (settings_name_steq(name, "data", &next) && !next) {
+        if (len != sizeof(mag_cal)) {
+            return -EINVAL;
+        }
+        rc = read_cb(cb_arg, &mag_cal, sizeof(mag_cal));
+        if (rc >= 0) {
+            printk("MAG CAL: Loaded from flash (%.3f, %.3f, %.3f) valid=%d\n",
+                   (double)mag_cal.offset_x,
+                   (double)mag_cal.offset_y,
+                   (double)mag_cal.offset_z,
+                   mag_cal.valid);
+            return 0;
+        }
+        return rc;
+    }
+    return -ENOENT;
+}
+
+static int mag_cal_settings_export(int (*cb)(const char *name,
+                                              const void *value, size_t val_len))
+{
+    return cb("mag_cal/data", &mag_cal, sizeof(mag_cal));
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(mag_cal, "mag_cal", NULL,
+                                mag_cal_settings_set, NULL,
+                                mag_cal_settings_export);
 
 static volatile bool calibrating = false;
 static float cal_min_x, cal_max_x;
@@ -47,13 +110,31 @@ static int cal_samples;
 #define SENSOR_STACK_SIZE 2048
 #define SENSOR_PRIORITY 5
 #define SENSOR_PERIOD_MS 20  /* 50 Hz */
-#define CALIBRATION_SAMPLES 500  /* ~10 seconds at 50 Hz */
+#define CALIBRATION_SAMPLES 3000  /* ~60 seconds at 50 Hz */
 
 K_THREAD_STACK_DEFINE(sensor_stack, SENSOR_STACK_SIZE);
 static struct k_thread sensor_thread_data;
 
 /* Message queue for orientation data */
 K_MSGQ_DEFINE(orientation_msgq, sizeof(struct sensor_msg), 10, 4);
+
+/* Current orientation (updated by sensor thread, read by other modules) */
+static volatile struct orientation_data current_orientation;
+
+float sensors_get_heading(void)
+{
+    return current_orientation.heading;
+}
+
+void sensors_get_orientation(struct orientation_data *out)
+{
+    if (out) {
+        out->roll = current_orientation.roll;
+        out->pitch = current_orientation.pitch;
+        out->heading = current_orientation.heading;
+        out->timestamp_ms = current_orientation.timestamp_ms;
+    }
+}
 
 int sensors_init(void)
 {
@@ -145,6 +226,14 @@ static void update_calibration(float mx, float my, float mz)
                (double)mag_cal.offset_x,
                (double)mag_cal.offset_y,
                (double)mag_cal.offset_z);
+
+        /* Save calibration to flash for persistence across reboots */
+        int err = settings_save_one("mag_cal/data", &mag_cal, sizeof(mag_cal));
+        if (err) {
+            printk("CAL: Failed to save to flash (err %d)\n", err);
+        } else {
+            printk("CAL: Saved to flash\n");
+        }
     }
 }
 
@@ -199,14 +288,6 @@ static void sensor_thread_fn(void *p1, void *p2, void *p3)
         float my_raw = (float)sensor_value_to_double(&magn[1]);
         float mz_raw = (float)sensor_value_to_double(&magn[2]);
 
-        /* Store raw values as integers (milli-g and milli-Gauss) */
-        msg.raw_ax = (int16_t)(ax_raw * 1000.0f / 9.81f);  /* m/s² to milli-g */
-        msg.raw_ay = (int16_t)(ay_raw * 1000.0f / 9.81f);
-        msg.raw_az = (int16_t)(az_raw * 1000.0f / 9.81f);
-        msg.raw_mx = (int16_t)(mx_raw * 1000.0f);  /* Gauss to milli-Gauss */
-        msg.raw_my = (int16_t)(my_raw * 1000.0f);
-        msg.raw_mz = (int16_t)(mz_raw * 1000.0f);
-
         /* Transform axes for micro:bit v2 LSM303AGR
          *
          * USER COORDINATE SYSTEM (measured via calibration):
@@ -214,23 +295,44 @@ static void sensor_thread_fn(void *p1, void *p2, void *p3)
          *   - X+ = away from user when display faces away
          *   - Y+ = left (right-hand system, toward Button A)
          *
-         * Measured sensor behavior:
+         * ACCELEROMETER (measured sensor behavior):
          *   - Z+ up (USB up): Sensor-Y = -1g
          *   - Y+ up (Btn A up): Sensor-X = +1g
          *   - X+ up (Display up): Sensor-Z = -1g
          *
-         * Transformation matrix:
+         * Transformation matrix (Accelerometer):
          *   User-X = -Sensor-Z
-         *   User-Y = +Sensor-X
+         *   User-Y = -Sensor-X
          *   User-Z = -Sensor-Y
          */
         float ax = -az_raw;   /* User-X = -Sensor-Z */
         float ay = -ax_raw;   /* User-Y = -Sensor-X (inverted for correct roll sign) */
         float az = -ay_raw;   /* User-Z = -Sensor-Y */
 
-        float mx = -mz_raw;
-        float my = -mx_raw;
-        float mz = -my_raw;
+        /* MAGNETOMETER (different orientation than accelerometer!)
+         *
+         * Measured: When rotating around Z (USB up), Sensor-X and Sensor-Z change,
+         * while Sensor-Y stays constant. This means:
+         *   - Sensor-Y = vertical axis (User-Z)
+         *   - Sensor-X, Sensor-Z = horizontal plane (User-X, User-Y)
+         *
+         * Transformation matrix (Magnetometer):
+         *   User-X = -Sensor-Z (horizontal, changes with Z-rotation)
+         *   User-Y = -Sensor-X (horizontal, changes with Z-rotation)
+         *   User-Z = -Sensor-Y (vertical, constant during Z-rotation)
+         */
+        float mx = -mz_raw;   /* User-X = -Sensor-Z */
+        float my = -mx_raw;   /* User-Y = -Sensor-X */
+        float mz = -my_raw;   /* User-Z = -Sensor-Y */
+
+        /* Store TRANSFORMED values as integers (milli-g and milli-Gauss)
+         * These are in USER coordinates, not sensor coordinates */
+        msg.raw_ax = (int16_t)(ax * 1000.0f / 9.81f);  /* m/s² to milli-g */
+        msg.raw_ay = (int16_t)(ay * 1000.0f / 9.81f);
+        msg.raw_az = (int16_t)(az * 1000.0f / 9.81f);
+        msg.raw_mx = (int16_t)(mx * 1000.0f);  /* Gauss to milli-Gauss */
+        msg.raw_my = (int16_t)(my * 1000.0f);
+        msg.raw_mz = (int16_t)(mz * 1000.0f);
 
         /* Update calibration if in progress */
         if (calibrating) {
@@ -248,16 +350,86 @@ static void sensor_thread_fn(void *p1, void *p2, void *p3)
         /* Calculate orientation directly (tilt-compensated compass)
          * This works much better than Mahony filter without a gyroscope
          */
-        float roll, pitch, heading;
+        float roll_raw, pitch_raw, heading_raw;
         mahony_get_euler_direct(ax, ay, az, mx_cal, my_cal, mz_cal,
-                                &roll, &pitch, &heading);
+                                &roll_raw, &pitch_raw, &heading_raw);
 
+        /* Apply low-pass filter for smoother output */
+        if (!filter_initialized) {
+            /* Initialize filter with first reading */
+            filtered_roll = roll_raw;
+            filtered_pitch = pitch_raw;
+            filtered_heading = heading_raw;
+            filtered_yaw_rate = 0.0f;
+            /* Initialize heading history */
+            for (int i = 0; i < YAW_RATE_SAMPLES; i++) {
+                heading_history[i] = heading_raw;
+            }
+            heading_history_idx = 0;
+            heading_history_full = false;
+            filter_initialized = true;
+        } else {
+            /* Exponential moving average for roll and pitch */
+            filtered_roll = LPF_ALPHA_ROLL * roll_raw +
+                           (1.0f - LPF_ALPHA_ROLL) * filtered_roll;
+            filtered_pitch = LPF_ALPHA_PITCH * pitch_raw +
+                            (1.0f - LPF_ALPHA_PITCH) * filtered_pitch;
 
-        /* Prepare message */
-        msg.orientation.roll = roll;
-        msg.orientation.pitch = pitch;
-        msg.orientation.heading = heading;
+            /* Special handling for heading (wrap-around at 0/360) */
+            float heading_diff = heading_raw - filtered_heading;
+            /* Handle wrap-around: if diff > 180, we crossed 0/360 boundary */
+            if (heading_diff > 180.0f) {
+                heading_diff -= 360.0f;
+            } else if (heading_diff < -180.0f) {
+                heading_diff += 360.0f;
+            }
+            filtered_heading += LPF_ALPHA_HEADING * heading_diff;
+            /* Normalize to 0-360 */
+            if (filtered_heading < 0.0f) {
+                filtered_heading += 360.0f;
+            } else if (filtered_heading >= 360.0f) {
+                filtered_heading -= 360.0f;
+            }
+
+            /* Store current heading in ring buffer */
+            int oldest_idx = (heading_history_idx + 1) % YAW_RATE_SAMPLES;
+            float oldest_heading = heading_history[oldest_idx];
+            heading_history[heading_history_idx] = filtered_heading;
+            heading_history_idx = oldest_idx;
+
+            /* Calculate yaw rate from heading change over YAW_RATE_SAMPLES
+             * This gives ~60ms time base at 50Hz (3 samples * 20ms) */
+            if (heading_history_full) {
+                float heading_change = filtered_heading - oldest_heading;
+                /* Handle wrap-around */
+                if (heading_change > 180.0f) {
+                    heading_change -= 360.0f;
+                } else if (heading_change < -180.0f) {
+                    heading_change += 360.0f;
+                }
+                /* Time delta is YAW_RATE_SAMPLES * SENSOR_PERIOD_MS */
+                float dt_ms = (float)(YAW_RATE_SAMPLES * SENSOR_PERIOD_MS);
+                float yaw_rate_raw = heading_change * (1000.0f / dt_ms);
+                /* Low-pass filter the yaw rate */
+                filtered_yaw_rate = LPF_ALPHA_YAW_RATE * yaw_rate_raw +
+                                   (1.0f - LPF_ALPHA_YAW_RATE) * filtered_yaw_rate;
+            } else {
+                heading_history_full = true;
+            }
+        }
+
+        /* Prepare message with filtered values */
+        msg.orientation.roll = filtered_roll;
+        msg.orientation.pitch = filtered_pitch;
+        msg.orientation.heading = filtered_heading;
         msg.orientation.timestamp_ms = k_uptime_get_32();
+        msg.yaw_rate = filtered_yaw_rate;
+
+        /* Update current orientation for direct access by other modules */
+        current_orientation.roll = filtered_roll;
+        current_orientation.pitch = filtered_pitch;
+        current_orientation.heading = filtered_heading;
+        current_orientation.timestamp_ms = msg.orientation.timestamp_ms;
 
         /* Send to output thread (non-blocking, drop if queue full) */
         k_msgq_put(&orientation_msgq, &msg, K_NO_WAIT);

@@ -18,8 +18,8 @@
 K_THREAD_STACK_DEFINE(output_stack, OUTPUT_STACK_SIZE);
 static struct k_thread output_thread_data;
 
-/* IMU streaming state (default: disabled to reduce noise) */
-static volatile bool imu_streaming_enabled = false;
+/* IMU streaming state (enabled for yaw testing) */
+static volatile bool imu_streaming_enabled = true;
 
 static void output_thread_fn(void *p1, void *p2, void *p3)
 {
@@ -36,14 +36,16 @@ static void output_thread_fn(void *p1, void *p2, void *p3)
 
         if (ret == 0 && imu_streaming_enabled) {
             /* Output orientation data:
-             * IMU,<timestamp_ms>,<roll>,<pitch>,<heading>
-             * Angles in degrees
+             * IMU,<timestamp_ms>,<roll>,<pitch>,<heading>,<yaw_rate>
+             * Angles in degrees, yaw_rate in degrees/second
              */
-            printk("IMU,%u,%.1f,%.1f,%.1f\r\n",
+            printk("IMU,%u,%.1f,%.1f,%.1f,%.1f\r\n",
                    msg.orientation.timestamp_ms,
                    (double)msg.orientation.roll,
                    (double)msg.orientation.pitch,
-                   (double)msg.orientation.heading);
+                   (double)msg.orientation.heading,
+                   (double)msg.yaw_rate);
+
         }
         /* If timeout or disabled, just continue (drain queue) */
     }

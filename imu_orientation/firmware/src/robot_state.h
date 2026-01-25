@@ -24,6 +24,7 @@ enum robot_state {
     ROBOT_STATE_IDLE,       /* Idle, showing heart animation */
     ROBOT_STATE_PAIRING,    /* BLE scanning for controller */
     ROBOT_STATE_CONNECTED,  /* Controller connected, showing eyes */
+    ROBOT_STATE_AUTONOMOUS, /* Autonomous navigation active */
 };
 
 /* ============================================================================
@@ -58,6 +59,8 @@ enum sound_event {
     SOUND_ERROR,            /* Error tone */
     SOUND_SHOOT,            /* Laser/shooting sound effect */
     SOUND_MACHINEGUN,       /* Machine gun rattle */
+    SOUND_CALIBRATION_BEEP, /* Short beep during calibration */
+    SOUND_CALIBRATION_DONE, /* Success jingle for calibration complete */
 };
 
 /* ============================================================================

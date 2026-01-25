@@ -77,4 +77,25 @@ bool ble_central_is_connected(void);
  */
 void ble_central_start_thread(void);
 
+/**
+ * Start auto-reconnect to bonded controller (if any)
+ * Called at startup after BLE is initialized
+ *
+ * @return 0 if reconnect started, -ENOENT if no bonded controller
+ */
+int ble_central_start_reconnect(void);
+
+/**
+ * Check if a controller is bonded
+ *
+ * @return true if we have a bonded controller
+ */
+bool ble_central_has_bonded_controller(void);
+
+/**
+ * Clear bonded controller
+ * Call this to forget the paired controller
+ */
+void ble_central_clear_bonds(void);
+
 #endif /* BLE_CENTRAL_H */

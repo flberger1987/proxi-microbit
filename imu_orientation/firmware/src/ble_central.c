@@ -25,6 +25,7 @@
 #include <zephyr/sys/printk.h>
 
 #include <string.h>
+#include <zephyr/settings/settings.h>
 
 /* Thread configuration */
 #define BLE_CENTRAL_STACK_SIZE 2048
@@ -87,7 +88,29 @@ static struct bt_gatt_discover_params discover_params;
 
 /* Scan timeout work */
 static struct k_work_delayable scan_timeout_work;
-#define SCAN_TIMEOUT_MS 30000
+#define SCAN_TIMEOUT_MS 30000      /* Scan duration before timeout */
+
+/* Auto-Reconnect Configuration
+ *
+ * After disconnect or device restart, the system automatically tries to
+ * reconnect to a previously bonded controller by scanning for advertisements.
+ *
+ * Flow:
+ * 1. On disconnect/startup: Wait RECONNECT_DELAY_MS, then start scan
+ * 2. Scan runs for SCAN_TIMEOUT_MS looking for controller advertisements
+ * 3. If found: Connect automatically
+ * 4. If timeout: Wait RECONNECT_RETRY_MS, then retry scan
+ *
+ * This approach works better than direct bt_conn_le_create() because the
+ * controller must be advertising before a connection can be established.
+ */
+static struct k_work_delayable reconnect_work;
+#define RECONNECT_DELAY_MS 2000    /* Delay before first reconnect attempt */
+#define RECONNECT_RETRY_MS 10000   /* Delay between scan retries */
+
+/* Stored bonded controller address (loaded from flash on init) */
+static bt_addr_le_t bonded_controller_addr;
+static bool bonded_controller_valid;
 
 /* ============================================================================
  * Forward Declarations
@@ -397,6 +420,12 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
     if (callbacks.disconnected) {
         callbacks.disconnected();
     }
+
+    /* Schedule auto-reconnect if we have a bonded controller */
+    if (bonded_controller_valid) {
+        printk("BLE Central: Scheduling reconnect in %d ms...\n", RECONNECT_DELAY_MS);
+        k_work_schedule(&reconnect_work, K_MSEC(RECONNECT_DELAY_MS));
+    }
 }
 
 static void security_changed_cb(struct bt_conn *conn, bt_security_t level,
@@ -416,6 +445,14 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level,
         start_hid_discovery(conn);
     } else {
         printk("BLE Central: Security changed for %s: level %d\n", addr, level);
+
+        /* Store bonded controller address for auto-reconnect */
+        if (level >= BT_SECURITY_L2) {
+            bt_addr_le_copy(&bonded_controller_addr, bt_conn_get_dst(conn));
+            bonded_controller_valid = true;
+            printk("BLE Central: Saved controller for auto-reconnect\n");
+        }
+
         /* Security established, now start HID discovery */
         start_hid_discovery(conn);
     }
@@ -542,6 +579,42 @@ static void scan_timeout_handler(struct k_work *work)
         robot_set_state(ROBOT_STATE_IDLE);
         /* Resume NUS advertising since scan ended */
         smp_bt_resume_advertising();
+
+        /* If we have a bonded controller, schedule another scan attempt
+         * This handles the case where the controller was turned off and
+         * gets turned on again later.
+         */
+        if (bonded_controller_valid) {
+            printk("BLE Central: Will retry scan in %d ms...\n", RECONNECT_RETRY_MS);
+            k_work_schedule(&reconnect_work, K_MSEC(RECONNECT_RETRY_MS));
+        }
+    }
+}
+
+static void reconnect_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    int err;
+
+    if (is_connected || is_scanning || controller_conn) {
+        return;  /* Already connected or connecting */
+    }
+
+    if (!bonded_controller_valid) {
+        return;  /* No bonded controller to reconnect to */
+    }
+
+    printk("BLE Central: Starting scan for bonded controller...\n");
+
+    /* Start a normal scan - this waits for the controller to advertise
+     * instead of trying to connect to a specific address immediately.
+     * The scan will find the controller when it starts advertising again.
+     */
+    err = ble_central_start_scan();
+    if (err && err != -EALREADY) {
+        printk("BLE Central: Reconnect scan failed (err %d), will retry...\n", err);
+        /* Retry after delay */
+        k_work_schedule(&reconnect_work, K_MSEC(RECONNECT_DELAY_MS * 2));
     }
 }
 
@@ -570,24 +643,41 @@ static void ble_central_thread_fn(void *p1, void *p2, void *p3)
  * Public API
  * ============================================================================ */
 
+/* Callback for bt_foreach_bond - find our controller */
+static void bond_info_cb(const struct bt_bond_info *info, void *user_data)
+{
+    char addr_str[BT_ADDR_LE_STR_LEN];
+
+    bt_addr_le_to_str(&info->addr, addr_str, sizeof(addr_str));
+    printk("BLE Central: Found bonded device: %s\n", addr_str);
+
+    /* Store the first bonded device as our controller */
+    if (!bonded_controller_valid) {
+        bt_addr_le_copy(&bonded_controller_addr, &info->addr);
+        bonded_controller_valid = true;
+        printk("BLE Central: Using %s as controller\n", addr_str);
+    }
+}
+
 int ble_central_init(const struct ble_central_callbacks *cbs)
 {
-    int err;
-
     if (cbs) {
         callbacks = *cbs;
     }
 
-    /* Clear all old bonding info to avoid KEY_REJECTED errors */
-    err = bt_unpair(BT_ID_DEFAULT, NULL);
-    if (err) {
-        printk("BLE Central: Failed to clear bonds (err %d)\n", err);
-    } else {
-        printk("BLE Central: Cleared old bonding info\n");
-    }
-
-    /* Initialize scan timeout work */
+    /* Initialize work items */
     k_work_init_delayable(&scan_timeout_work, scan_timeout_handler);
+    k_work_init_delayable(&reconnect_work, reconnect_handler);
+
+    /* Check for existing bonds (don't clear them!) */
+    bonded_controller_valid = false;
+    bt_foreach_bond(BT_ID_DEFAULT, bond_info_cb, NULL);
+
+    if (bonded_controller_valid) {
+        printk("BLE Central: Will auto-reconnect to bonded controller\n");
+    } else {
+        printk("BLE Central: No bonded controller found\n");
+    }
 
     printk("BLE Central: Initialized\n");
     return 0;
@@ -678,4 +768,43 @@ void ble_central_start_thread(void)
                     ble_central_thread_fn, NULL, NULL, NULL,
                     BLE_CENTRAL_PRIORITY, 0, K_NO_WAIT);
     k_thread_name_set(&ble_central_thread_data, "ble_ctrl");
+}
+
+int ble_central_start_reconnect(void)
+{
+    if (!bonded_controller_valid) {
+        printk("BLE Central: No bonded controller to reconnect\n");
+        return -ENOENT;
+    }
+
+    if (is_connected || is_scanning || controller_conn) {
+        printk("BLE Central: Already connected or connecting\n");
+        return -EALREADY;
+    }
+
+    /* Schedule reconnect attempt */
+    k_work_schedule(&reconnect_work, K_MSEC(100));
+    return 0;
+}
+
+bool ble_central_has_bonded_controller(void)
+{
+    return bonded_controller_valid;
+}
+
+void ble_central_clear_bonds(void)
+{
+    int err;
+
+    printk("BLE Central: Clearing all bonds...\n");
+
+    err = bt_unpair(BT_ID_DEFAULT, NULL);
+    if (err) {
+        printk("BLE Central: Failed to clear bonds (err %d)\n", err);
+    } else {
+        printk("BLE Central: Bonds cleared\n");
+    }
+
+    bonded_controller_valid = false;
+    memset(&bonded_controller_addr, 0, sizeof(bonded_controller_addr));
 }

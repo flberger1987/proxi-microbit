@@ -28,6 +28,12 @@ target_sources(app PRIVATE
     src/motor_driver.c
     src/audio.c
 
+    # Sensors (additional)
+    src/ir_sensors.c
+
+    # Autonomous Navigation
+    src/autonomous_nav.c
+
     # Testing
     src/motor_test.c
 )
