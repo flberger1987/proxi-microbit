@@ -36,6 +36,8 @@
 #include "motor_test.h"
 #include "ir_sensors.h"
 #include "autonomous_nav.h"
+#include "yaw_controller.h"
+#include "sysid.h"
 
 /* ============================================================================
  * Display Animations
@@ -396,6 +398,7 @@ static void on_controller_connected(void)
     printk("Controller connected!\n");
     audio_play(SOUND_CONNECTED);
     motor_enable(true);
+    yaw_controller_enable(true);  /* Enable yaw rate control */
 }
 
 static void on_controller_disconnected(void)
@@ -404,6 +407,8 @@ static void on_controller_disconnected(void)
     audio_play(SOUND_DISCONNECTED);
     motor_enable(false);
     motor_emergency_stop();
+    yaw_controller_enable(false);
+    yaw_controller_reset();
 }
 
 /* Previous button state for edge detection */
@@ -427,6 +432,7 @@ static void on_controller_input(const uint8_t *data, uint16_t len)
     bool dpad_changed = (input.dpad != prev_dpad);
     bool dpad_up_pressed = dpad_changed && (input.dpad == XBOX_DPAD_UP);
     bool dpad_down_pressed = dpad_changed && (input.dpad == XBOX_DPAD_DOWN);
+    bool dpad_left_pressed = dpad_changed && (input.dpad == XBOX_DPAD_LEFT);
 
     /* ========== Manual Override Detection ========== */
     if (autonav_is_enabled()) {
@@ -463,6 +469,11 @@ static void on_controller_input(const uint8_t *data, uint16_t len)
     /* D-Pad DOWN: Start yaw test (only when autonomous mode is off) */
     if (dpad_down_pressed && !autonav_is_enabled() && !autonav_is_yaw_test_running()) {
         autonav_start_yaw_test();
+    }
+
+    /* D-Pad LEFT: Start system identification test */
+    if (dpad_left_pressed && !sysid_is_running() && !autonav_is_enabled()) {
+        sysid_run_full_test();
     }
 
     /* Update previous D-Pad state */
@@ -502,8 +513,17 @@ static void on_controller_input(const uint8_t *data, uint16_t len)
         return;
     }
 
-    /* Convert to motor command */
+    /* Set target yaw rate from triggers (closed-loop control) */
+    yaw_controller_set_triggers(input.left_trigger, input.right_trigger);
+
+    /* Convert to motor command (linear only, angular handled by yaw controller) */
     hid_input_to_motor_cmd(&input, &cmd);
+
+    /* When yaw controller is active, zero out angular from HID parser
+     * (yaw controller computes angular in motor thread) */
+    if (yaw_controller_is_enabled()) {
+        cmd.angular = 0;
+    }
 
     /* Send to motor thread */
     k_msgq_put(&motor_cmd_q, &cmd, K_NO_WAIT);
@@ -621,7 +641,9 @@ int main(void)
     printk("Short-press Button B: Emergency stop\n");
     printk("Long-press Button B: Magnetometer calibration (60s)\n");
     printk("D-Pad UP: Toggle autonomous mode\n");
-    printk("D-Pad DOWN: Start yaw test\n\n");
+    printk("D-Pad DOWN: Start yaw test\n");
+    printk("D-Pad LEFT: System identification test\n");
+    printk("Triggers: Yaw rate control (max 20 deg/s)\n\n");
 
     /* Get display */
     disp = mb_display_get();
@@ -692,6 +714,12 @@ int main(void)
     ret = autonav_init();
     if (ret != 0) {
         printk("WARNING: Autonomous nav init failed (err %d)\n", ret);
+    }
+
+    /* Initialize yaw rate controller */
+    ret = yaw_controller_init();
+    if (ret != 0) {
+        printk("WARNING: Yaw controller init failed (err %d)\n", ret);
     }
 
     /* Start all threads */

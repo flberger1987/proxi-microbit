@@ -34,9 +34,9 @@ static struct mahony_filter ahrs_filter;
  * alpha = 1.0: no filtering (raw values)
  * alpha = 0.1: heavy filtering (slow response)
  */
-#define LPF_ALPHA_ROLL    0.08f  /* Strong filtering for roll (accelerometer noise) */
-#define LPF_ALPHA_PITCH   0.08f  /* Strong filtering for pitch (accelerometer noise) */
-#define LPF_ALPHA_HEADING 0.15f  /* Heading smoothing (magnetometer is cleaner) */
+#define LPF_ALPHA_ROLL    0.15f  /* Roll filtering (accelerometer noise) */
+#define LPF_ALPHA_PITCH   0.15f  /* Pitch filtering (accelerometer noise) */
+#define LPF_ALPHA_HEADING 1.0f   /* No LPF - Kalman does the filtering */
 #define LPF_ALPHA_YAW_RATE 0.1f  /* Yaw rate smoothing */
 
 /* Filtered orientation values */
@@ -45,12 +45,152 @@ static float filtered_pitch = 0.0f;
 static float filtered_heading = 0.0f;
 static float filtered_yaw_rate = 0.0f;  /* Degrees per second */
 
-/* Yaw rate calculation with longer time base (~60ms = 3 samples at 50Hz)
- * This reduces noise in the derivative */
-#define YAW_RATE_SAMPLES 3
-static float heading_history[YAW_RATE_SAMPLES];
-static int heading_history_idx = 0;
-static bool heading_history_full = false;
+/* Savitzky-Golay filter for yaw rate derivation
+ *
+ * Using 5-point window with 2nd order polynomial for first derivative.
+ * Coefficients: [-2, -1, 0, 1, 2] / 10
+ *
+ * Reference: https://www.cbcity.de/differenzieren-verrauschter-signale
+ *
+ * Window: 5 samples = 100ms at 50Hz
+ * Effective lag: 2 samples = 40ms (centered estimate)
+ */
+#define SG_WINDOW_SIZE 5
+static float heading_buffer[SG_WINDOW_SIZE];
+static int heading_buf_idx = 0;
+static int heading_buf_count = 0;
+
+/* Savitzky-Golay coefficients for 1st derivative, 5-point, 2nd order polynomial */
+static const int sg_coeff[SG_WINDOW_SIZE] = {-2, -1, 0, 1, 2};
+#define SG_NORM 10
+
+/* ============================================================================
+ * 2D Kalman Filter for Heading and Yaw Rate
+ *
+ * State vector: x = [θ, ω]^T  (heading in degrees, yaw rate in °/s)
+ *
+ * System model (motor dynamics):
+ *   θ[k+1] = θ[k] + ω[k] × dt
+ *   ω[k+1] = A × ω[k] + B × u[k]
+ *
+ * Measurement: z = θ_magnetometer (direct heading measurement - no derivative!)
+ *
+ * Identified parameters:
+ *   τ = 1.3s, K = 0.4 °/s per PWM%
+ * ============================================================================ */
+
+/* Motor model parameters
+ * τ_up = 1.3s (acceleration - from sysid)
+ * τ_down = 0.3s (deceleration - faster due to friction)
+ */
+#define MOTOR_TAU    0.3f          /* Time constant for stopping (faster) */
+#define MOTOR_K      0.4f          /* Gain: °/s per PWM% */
+#define DT           0.1f          /* Sample time: 100ms */
+
+/* Discretized model coefficient for ω dynamics */
+#define OMEGA_A      (1.0f - DT/MOTOR_TAU)   /* 0.667 */
+#define OMEGA_B      (MOTOR_K * DT/MOTOR_TAU) /* 0.133 */
+
+/* Noise parameters */
+#define Q_THETA      0.5f          /* Process noise for heading */
+#define Q_OMEGA      10.0f         /* Process noise for yaw rate (high = fast response) */
+#define R_THETA      0.5f          /* Measurement noise (very low = trust magnetometer) */
+
+/* State vector [θ, ω] */
+static float kalman_theta = 0.0f;  /* Heading estimate (degrees) */
+static float kalman_omega = 0.0f;  /* Yaw rate estimate (°/s) */
+
+/* Covariance matrix P (2x2, stored as 4 elements) */
+static float P00 = 10.0f, P01 = 0.0f;
+static float P10 = 0.0f,  P11 = 10.0f;
+
+/* Current motor command (set by yaw controller) */
+static volatile float current_motor_cmd = 0.0f;
+
+void sensors_set_motor_cmd(float pwm_percent)
+{
+    current_motor_cmd = pwm_percent;
+}
+
+/**
+ * Normalize angle to 0-360 range
+ */
+static float normalize_angle(float angle)
+{
+    while (angle < 0.0f) angle += 360.0f;
+    while (angle >= 360.0f) angle -= 360.0f;
+    return angle;
+}
+
+/**
+ * Compute angle difference handling wrap-around
+ */
+static float angle_diff(float a, float b)
+{
+    float diff = a - b;
+    if (diff > 180.0f) diff -= 360.0f;
+    if (diff < -180.0f) diff += 360.0f;
+    return diff;
+}
+
+/**
+ * 2D Kalman filter update
+ * Input: raw magnetometer heading (degrees)
+ * Updates internal state and returns filtered yaw rate
+ */
+static float kalman_update_2d(float measured_heading)
+{
+    /* ===== PREDICT STEP ===== */
+    /* State prediction using motor model */
+    float theta_pred = kalman_theta + kalman_omega * DT;
+    float omega_pred = OMEGA_A * kalman_omega + OMEGA_B * current_motor_cmd;
+
+    theta_pred = normalize_angle(theta_pred);
+
+    /* Covariance prediction: P = F × P × F^T + Q
+     * F = | 1   dt |
+     *     | 0   A  |
+     */
+    float F00 = 1.0f, F01 = DT;
+    float F10 = 0.0f, F11 = OMEGA_A;
+
+    /* P_pred = F × P × F^T + Q */
+    float P00_pred = F00*P00*F00 + F00*P01*F10 + F01*P10*F00 + F01*P11*F10 + Q_THETA;
+    float P01_pred = F00*P00*F01 + F00*P01*F11 + F01*P10*F01 + F01*P11*F11;
+    float P10_pred = F10*P00*F00 + F10*P01*F10 + F11*P10*F00 + F11*P11*F10;
+    float P11_pred = F10*P00*F01 + F10*P01*F11 + F11*P10*F01 + F11*P11*F11 + Q_OMEGA;
+
+    /* ===== UPDATE STEP ===== */
+    /* Measurement: z = θ, H = [1, 0] */
+    float innovation = angle_diff(measured_heading, theta_pred);
+
+    /* S = H × P × H^T + R = P00 + R */
+    float S = P00_pred + R_THETA;
+
+    /* Kalman gain: K = P × H^T × S^(-1) = [P00/S, P10/S]^T */
+    float K0 = P00_pred / S;
+    float K1 = P10_pred / S;
+
+    /* State update: x = x_pred + K × innovation */
+    kalman_theta = normalize_angle(theta_pred + K0 * innovation);
+    kalman_omega = omega_pred + K1 * innovation;
+
+    /* Covariance update: P = (I - K×H) × P_pred */
+    P00 = (1.0f - K0) * P00_pred;
+    P01 = (1.0f - K0) * P01_pred;
+    P10 = P10_pred - K1 * P00_pred;
+    P11 = P11_pred - K1 * P01_pred;
+
+    return kalman_omega;
+}
+
+/**
+ * Get filtered heading from Kalman state
+ */
+float kalman_get_heading(void)
+{
+    return kalman_theta;
+}
 
 static bool filter_initialized = false;
 
@@ -109,7 +249,7 @@ static int cal_samples;
 /* Sensor thread */
 #define SENSOR_STACK_SIZE 2048
 #define SENSOR_PRIORITY 5
-#define SENSOR_PERIOD_MS 20  /* 50 Hz */
+#define SENSOR_PERIOD_MS 100  /* 10 Hz - Kalman predicts between measurements */
 #define CALIBRATION_SAMPLES 3000  /* ~60 seconds at 50 Hz */
 
 K_THREAD_STACK_DEFINE(sensor_stack, SENSOR_STACK_SIZE);
@@ -124,6 +264,11 @@ static volatile struct orientation_data current_orientation;
 float sensors_get_heading(void)
 {
     return current_orientation.heading;
+}
+
+float sensors_get_yaw_rate(void)
+{
+    return filtered_yaw_rate;
 }
 
 void sensors_get_orientation(struct orientation_data *out)
@@ -354,68 +499,28 @@ static void sensor_thread_fn(void *p1, void *p2, void *p3)
         mahony_get_euler_direct(ax, ay, az, mx_cal, my_cal, mz_cal,
                                 &roll_raw, &pitch_raw, &heading_raw);
 
-        /* Apply low-pass filter for smoother output */
+        /* Apply filters */
         if (!filter_initialized) {
             /* Initialize filter with first reading */
             filtered_roll = roll_raw;
             filtered_pitch = pitch_raw;
+            /* Initialize 2D Kalman with first heading */
+            kalman_theta = heading_raw;
+            kalman_omega = 0.0f;
             filtered_heading = heading_raw;
             filtered_yaw_rate = 0.0f;
-            /* Initialize heading history */
-            for (int i = 0; i < YAW_RATE_SAMPLES; i++) {
-                heading_history[i] = heading_raw;
-            }
-            heading_history_idx = 0;
-            heading_history_full = false;
             filter_initialized = true;
         } else {
-            /* Exponential moving average for roll and pitch */
+            /* Low-pass filter for roll and pitch */
             filtered_roll = LPF_ALPHA_ROLL * roll_raw +
                            (1.0f - LPF_ALPHA_ROLL) * filtered_roll;
             filtered_pitch = LPF_ALPHA_PITCH * pitch_raw +
                             (1.0f - LPF_ALPHA_PITCH) * filtered_pitch;
 
-            /* Special handling for heading (wrap-around at 0/360) */
-            float heading_diff = heading_raw - filtered_heading;
-            /* Handle wrap-around: if diff > 180, we crossed 0/360 boundary */
-            if (heading_diff > 180.0f) {
-                heading_diff -= 360.0f;
-            } else if (heading_diff < -180.0f) {
-                heading_diff += 360.0f;
-            }
-            filtered_heading += LPF_ALPHA_HEADING * heading_diff;
-            /* Normalize to 0-360 */
-            if (filtered_heading < 0.0f) {
-                filtered_heading += 360.0f;
-            } else if (filtered_heading >= 360.0f) {
-                filtered_heading -= 360.0f;
-            }
-
-            /* Store current heading in ring buffer */
-            int oldest_idx = (heading_history_idx + 1) % YAW_RATE_SAMPLES;
-            float oldest_heading = heading_history[oldest_idx];
-            heading_history[heading_history_idx] = filtered_heading;
-            heading_history_idx = oldest_idx;
-
-            /* Calculate yaw rate from heading change over YAW_RATE_SAMPLES
-             * This gives ~60ms time base at 50Hz (3 samples * 20ms) */
-            if (heading_history_full) {
-                float heading_change = filtered_heading - oldest_heading;
-                /* Handle wrap-around */
-                if (heading_change > 180.0f) {
-                    heading_change -= 360.0f;
-                } else if (heading_change < -180.0f) {
-                    heading_change += 360.0f;
-                }
-                /* Time delta is YAW_RATE_SAMPLES * SENSOR_PERIOD_MS */
-                float dt_ms = (float)(YAW_RATE_SAMPLES * SENSOR_PERIOD_MS);
-                float yaw_rate_raw = heading_change * (1000.0f / dt_ms);
-                /* Low-pass filter the yaw rate */
-                filtered_yaw_rate = LPF_ALPHA_YAW_RATE * yaw_rate_raw +
-                                   (1.0f - LPF_ALPHA_YAW_RATE) * filtered_yaw_rate;
-            } else {
-                heading_history_full = true;
-            }
+            /* 2D Kalman filter: feed raw heading, get filtered heading + yaw rate
+             * No S-G derivative needed - Kalman estimates ω from θ measurements */
+            filtered_yaw_rate = kalman_update_2d(heading_raw);
+            filtered_heading = kalman_theta;
         }
 
         /* Prepare message with filtered values */

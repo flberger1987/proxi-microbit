@@ -82,6 +82,13 @@ void ir_sensors_get_calibration(struct ir_calibration *cal);
 void ir_sensors_set_debug(bool enabled);
 
 /**
+ * Get Kalman-filtered distance values in mm
+ * @param left_mm Pointer to store left distance (mm)
+ * @param right_mm Pointer to store right distance (mm)
+ */
+void ir_sensors_get_distance(float *left_mm, float *right_mm);
+
+/**
  * GPIO Test Mode - find IR LED enable pin
  */
 void ir_sensors_gpio_test_init(void);

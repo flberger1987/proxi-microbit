@@ -44,6 +44,12 @@ const struct mag_calibration *sensors_get_calibration(void);
 /* Get current heading (thread-safe, updated at 50Hz) */
 float sensors_get_heading(void);
 
+/* Get current yaw rate in degrees/second (thread-safe, updated at 50Hz) */
+float sensors_get_yaw_rate(void);
+
+/* Set current motor command for Kalman filter prediction (called by motor driver) */
+void sensors_set_motor_cmd(float pwm_percent);
+
 /* Get full current orientation data (thread-safe) */
 void sensors_get_orientation(struct orientation_data *out);
 

@@ -6,6 +6,7 @@
 #include "serial_output.h"
 #include "sensors.h"
 #include "orientation.h"
+#include "yaw_controller.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
@@ -35,17 +36,21 @@ static void output_thread_fn(void *p1, void *p2, void *p3)
         ret = k_msgq_get(&orientation_msgq, &msg, K_MSEC(OUTPUT_PERIOD_MS));
 
         if (ret == 0 && imu_streaming_enabled) {
+            /* Get motor output from yaw controller */
+            float motor_output;
+            yaw_controller_get_debug(NULL, NULL, &motor_output);
+
             /* Output orientation data:
-             * IMU,<timestamp_ms>,<roll>,<pitch>,<heading>,<yaw_rate>
-             * Angles in degrees, yaw_rate in degrees/second
+             * IMU,<timestamp_ms>,<roll>,<pitch>,<heading>,<yaw_rate>,<motor_pwm>
+             * Angles in degrees, yaw_rate in deg/s, motor_pwm in %
              */
-            printk("IMU,%u,%.1f,%.1f,%.1f,%.1f\r\n",
+            printk("IMU,%u,%.1f,%.1f,%.1f,%.1f,%.0f\r\n",
                    msg.orientation.timestamp_ms,
                    (double)msg.orientation.roll,
                    (double)msg.orientation.pitch,
                    (double)msg.orientation.heading,
-                   (double)msg.yaw_rate);
-
+                   (double)msg.yaw_rate,
+                   (double)motor_output);
         }
         /* If timeout or disabled, just continue (drain queue) */
     }

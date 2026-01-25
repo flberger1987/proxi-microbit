@@ -97,9 +97,18 @@ static void nus_received(struct bt_conn *conn, const void *data, uint16_t len, v
         /* Disable IMU streaming */
         serial_output_set_imu_enabled(false);
         bt_nus_send(conn, "IMU:OFF\r\n", 9);
+    } else if (strcmp(cmd, "IRD") == 0 || strcmp(cmd, "ird") == 0) {
+        /* Toggle IR sensor debug output */
+        extern void ir_sensors_set_debug(bool);
+        extern bool ir_sensors_is_calibrating(void);
+        static bool ir_debug_on = true;  /* Matches default in ir_sensors.c */
+        ir_debug_on = !ir_debug_on;
+        ir_sensors_set_debug(ir_debug_on);
+        bt_nus_send(conn, ir_debug_on ? "IRD:ON\r\n" : "IRD:OFF\r\n",
+                    ir_debug_on ? 8 : 9);
     } else if (strcmp(cmd, "HELP") == 0 || strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         /* List available commands */
-        bt_nus_send(conn, "CMD:VER,CAL,IMU,IMUON,IMUOFF,HELP\r\n", 35);
+        bt_nus_send(conn, "CMD:VER,CAL,IMU,IRD,HELP\r\n", 26);
     } else {
         /* Unknown command */
         bt_nus_send(conn, "ERR:UNKNOWN\r\n", 13);

@@ -98,6 +98,20 @@ static const struct ir_cal_point ir_cal_table[] = {
 #define BIAS_CAL_DELAY_MS   50      /* Delay between samples */
 
 /* ============================================================================
+ * Kalman Filter Configuration
+ * ============================================================================
+ * 1D Kalman filter for distance estimation
+ * State: d (distance in mm)
+ * Model: d[k+1] = d[k]  (constant position, obstacles move slowly)
+ * Measurement: IR raw → mm via lookup table
+ *
+ * Parameters tuned for 20Hz sampling (50ms interval)
+ */
+#define KALMAN_Q_DISTANCE   100.0f   /* Process noise variance (mm²) - how much distance can change */
+#define KALMAN_R_DISTANCE   400.0f   /* Measurement noise variance (mm²) - sensor noise */
+#define KALMAN_INITIAL_P    10000.0f /* Initial estimation error variance */
+
+/* ============================================================================
  * Thread and Stack
  * ============================================================================ */
 
@@ -197,7 +211,7 @@ static struct ir_calibration calibration = {
 };
 
 static volatile bool calibrating = false;
-static volatile bool debug_enabled = false;  /* Disabled to reduce serial noise */
+static volatile bool debug_enabled = true;  /* Enable for ir_plot.py visualization */
 
 /* Current readings */
 static volatile uint16_t current_left_raw = 0;
@@ -218,6 +232,13 @@ static bool bias_calibrated = false;
 /* Calibration tracking */
 static uint16_t cal_left_min, cal_left_max;
 static uint16_t cal_right_min, cal_right_max;
+
+/* Kalman filter state for distance estimation */
+static float kalman_left_d = 550.0f;   /* Estimated left distance (mm) */
+static float kalman_right_d = 550.0f;  /* Estimated right distance (mm) */
+static float kalman_left_p = KALMAN_INITIAL_P;   /* Left estimation error covariance */
+static float kalman_right_p = KALMAN_INITIAL_P;  /* Right estimation error covariance */
+static bool kalman_initialized = false;
 
 /* ============================================================================
  * Helper Functions
@@ -278,6 +299,31 @@ static uint16_t raw_to_mm(uint16_t raw)
     }
 
     return ir_cal_table[IR_CAL_TABLE_SIZE - 1].mm;
+}
+
+/**
+ * 1D Kalman filter update for distance estimation
+ * @param estimate Current estimated distance (mm)
+ * @param p Current estimation error covariance
+ * @param measurement New measured distance (mm)
+ * @return Updated estimated distance
+ */
+static float kalman_update_distance(float *estimate, float *p, float measurement)
+{
+    /* Predict step (constant position model) */
+    float d_pred = *estimate;
+    float p_pred = *p + KALMAN_Q_DISTANCE;
+
+    /* Update step */
+    float k = p_pred / (p_pred + KALMAN_R_DISTANCE);  /* Kalman gain */
+    *estimate = d_pred + k * (measurement - d_pred);
+    *p = (1.0f - k) * p_pred;
+
+    /* Clamp to valid range */
+    if (*estimate < 50.0f) *estimate = 50.0f;
+    if (*estimate > 600.0f) *estimate = 600.0f;
+
+    return *estimate;
 }
 
 /**
@@ -429,12 +475,33 @@ static void ir_thread_fn(void *p1, void *p2, void *p3)
         current_left_raw = (uint16_t)ir_left;
         current_right_raw = (uint16_t)ir_right;
 
-        /* Debug output */
+        /*
+         * Convert raw IR to distance in mm
+         * Then apply Kalman filter for smoothing
+         */
+        float left_mm_raw = (float)raw_to_mm((uint16_t)ir_left);
+        float right_mm_raw = (float)raw_to_mm((uint16_t)ir_right);
+
+        if (!kalman_initialized) {
+            kalman_left_d = left_mm_raw;
+            kalman_right_d = right_mm_raw;
+            kalman_left_p = KALMAN_INITIAL_P;
+            kalman_right_p = KALMAN_INITIAL_P;
+            kalman_initialized = true;
+        }
+
+        /* Apply Kalman filter */
+        float left_mm_filt = kalman_update_distance(&kalman_left_d, &kalman_left_p, left_mm_raw);
+        float right_mm_filt = kalman_update_distance(&kalman_right_d, &kalman_right_p, right_mm_raw);
+
+        /* Debug output for plotting: IR,<ts>,<left_mm>,<right_mm>,<left_raw>,<right_raw>,<left_mm_raw>,<right_mm_raw> */
         if (debug_enabled) {
-            printk("IR: L=%4d R=%4d (filt: L=%d R=%d, bias: L=%d R=%d)\n",
+            int64_t ts = k_uptime_get();
+            printk("IR,%lld,%.0f,%.0f,%d,%d,%.0f,%.0f\n",
+                   ts,
+                   (double)left_mm_filt, (double)right_mm_filt,
                    ir_left, ir_right,
-                   ir_left_filt, ir_right_filt,
-                   bias_left, bias_right);
+                   (double)left_mm_raw, (double)right_mm_raw);
         }
 
         /* Manual calibration mode: track min/max using RAW values */
@@ -447,13 +514,13 @@ static void ir_thread_fn(void *p1, void *p2, void *p3)
         }
 
         /*
-         * Convert raw IR to distance in mm, then calculate proximity beep
+         * Calculate proximity beep using Kalman-filtered distance
          * - >= 400mm: silence
-         * - 400mm to 100mm: linear beep rate (distance is already linearized!)
+         * - 400mm to 100mm: linear beep rate
          * - <= 100mm: continuous tone
          */
-        int16_t max_ir = (ir_left > ir_right) ? ir_left : ir_right;
-        uint16_t distance_mm = raw_to_mm((uint16_t)max_ir);
+        float min_distance = (left_mm_filt < right_mm_filt) ? left_mm_filt : right_mm_filt;
+        uint16_t distance_mm = (uint16_t)min_distance;
         uint16_t proximity_pct = 0;
 
         if (distance_mm <= PROX_BEEP_MAX_MM) {
@@ -464,10 +531,6 @@ static void ir_thread_fn(void *p1, void *p2, void *p3)
                            (PROX_BEEP_START_MM - PROX_BEEP_MAX_MM);
         }
         /* else: distance >= 400mm, proximity_pct = 0, silence */
-
-        if (debug_enabled) {
-            printk("  -> dist=%dmm, prox=%d%%\n", distance_mm, proximity_pct);
-        }
 
         audio_proximity_set(proximity_pct);
 
@@ -651,6 +714,16 @@ void ir_sensors_set_debug(bool enabled)
 {
     debug_enabled = enabled;
     printk("IR debug %s\n", enabled ? "enabled" : "disabled");
+}
+
+void ir_sensors_get_distance(float *left_mm, float *right_mm)
+{
+    if (left_mm) {
+        *left_mm = kalman_left_d;
+    }
+    if (right_mm) {
+        *right_mm = kalman_right_d;
+    }
 }
 
 /* ============================================================================

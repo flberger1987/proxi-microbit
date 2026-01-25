@@ -12,6 +12,8 @@
 
 #include "motor_driver.h"
 #include "robot_state.h"
+#include "yaw_controller.h"
+#include "sensors.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -190,13 +192,14 @@ static void motor_thread_fn(void *p1, void *p2, void *p3)
 
     while (1) {
         /* Check for new motor command */
-        ret = k_msgq_get(&motor_cmd_q, &cmd, K_MSEC(50));
+        ret = k_msgq_get(&motor_cmd_q, &cmd, K_MSEC(20));
 
         if (ret == 0) {
             if (cmd.emergency_stop) {
                 current_linear = 0;
                 current_angular = 0;
                 stop_all_motors();
+                yaw_controller_reset();
                 printk("EMERGENCY STOP\n");
             } else {
                 current_linear = cmd.linear;
@@ -206,13 +209,42 @@ static void motor_thread_fn(void *p1, void *p2, void *p3)
 
         /* Update motors if enabled */
         if (motors_enabled) {
+            int16_t angular_output;
+
+            /* Use yaw rate controller if enabled */
+            if (yaw_controller_is_enabled()) {
+                /* Get current yaw rate from IMU */
+                float measured_rate = sensors_get_yaw_rate();
+
+                /* Update controller and get motor output */
+                angular_output = yaw_controller_update(measured_rate);
+
+                /* Debug output every 200ms for tuning */
+                static int64_t last_debug = 0;
+                int64_t now = k_uptime_get();
+                if (now - last_debug >= 200) {
+                    last_debug = now;
+                    float target = yaw_controller_get_target();
+                    float err, integ, out;
+                    yaw_controller_get_debug(&err, &integ, &out);
+                    printk("YAW,%.1f,%.1f,%d,%.1f,%.1f\n",
+                           (double)target, (double)measured_rate, angular_output,
+                           (double)err, (double)integ);
+                }
+            } else {
+                /* Direct pass-through */
+                angular_output = current_angular;
+            }
+
             set_walk_motor(current_linear);
-            set_turn_motor(current_angular);
+            set_turn_motor(angular_output);
+
+            /* Feed motor command to Kalman filter for prediction */
+            sensors_set_motor_cmd((float)angular_output);
         } else {
             stop_all_motors();
+            sensors_set_motor_cmd(0.0f);
         }
-
-        k_msleep(20);  /* 50 Hz update rate */
     }
 }
 
