@@ -1081,6 +1081,19 @@ struct telemetry_packet {
 
 ### Sensorfusion & Kalman-Filter
 
+> **TODO: Heading-Drehrichtung verifizieren**
+>
+> Die aktuelle Annahme ist:
+> - `angular > 0` (Rechts drehen, CW von oben) → Heading **steigt**
+> - `angular < 0` (Links drehen, CCW von oben) → Heading **sinkt**
+>
+> Dies muss experimentell überprüft werden! Die Konvention hängt ab von:
+> 1. Magnetometer-Achsen-Transformation (sensors.c)
+> 2. Heading-Formel `atan2(-yh, xh)` (orientation.c)
+> 3. Kalman Motor-Feedforward Vorzeichen (OMEGA_B * motor_cmd)
+>
+> Falls invertiert: Entweder Motor-Vorzeichen oder Heading-Formel anpassen.
+
 **Orientierung (Roll/Pitch):**
 - Mahony AHRS Filter (Quaternion-basiert)
 - Fusioniert Accelerometer + Magnetometer
