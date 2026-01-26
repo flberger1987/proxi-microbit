@@ -18,7 +18,6 @@
 
 #include "ir_sensors.h"
 #include "robot_state.h"
-#include "audio.h"
 
 /* ============================================================================
  * Configuration
@@ -64,10 +63,6 @@
 #define DEFAULT_MIN         30      /* Typical no-obstacle value */
 #define DEFAULT_MAX         3600    /* Typical close-obstacle value */
 #define DEFAULT_THRESHOLD   15      /* 15% threshold (~560) for detection */
-
-/* Proximity beep thresholds in mm */
-#define PROX_BEEP_START_MM  400     /* Start beeping at 400mm */
-#define PROX_BEEP_MAX_MM    100     /* Continuous tone at 100mm */
 
 /*
  * IR raw-to-distance calibration (Least Squares Fit)
@@ -410,8 +405,7 @@ static void ir_thread_fn(void *p1, void *p2, void *p3)
         bias_calibrated = true;
         printk("IR: Bias calibration done: L=%d R=%d\n", bias_left, bias_right);
 
-        /* Enable proximity beeping after calibration */
-        audio_proximity_enable(true);
+        /* Note: Proximity beeping disabled - display blink used instead (see main.c) */
     }
 
     while (1) {
@@ -513,27 +507,6 @@ static void ir_thread_fn(void *p1, void *p2, void *p3)
             continue;  /* Skip normal processing during calibration */
         }
 
-        /*
-         * Calculate proximity beep using Kalman-filtered distance
-         * - >= 400mm: silence
-         * - 400mm to 100mm: linear beep rate
-         * - <= 100mm: continuous tone
-         */
-        float min_distance = (left_mm_filt < right_mm_filt) ? left_mm_filt : right_mm_filt;
-        uint16_t distance_mm = (uint16_t)min_distance;
-        uint16_t proximity_pct = 0;
-
-        if (distance_mm <= PROX_BEEP_MAX_MM) {
-            proximity_pct = 100;  /* Continuous tone at 100mm or less */
-        } else if (distance_mm < PROX_BEEP_START_MM) {
-            /* Linear scale: 400mm→0%, 100mm→100% (distance already linearized) */
-            proximity_pct = ((PROX_BEEP_START_MM - distance_mm) * 100) /
-                           (PROX_BEEP_START_MM - PROX_BEEP_MAX_MM);
-        }
-        /* else: distance >= 400mm, proximity_pct = 0, silence */
-
-        audio_proximity_set(proximity_pct);
-
         /* Check obstacle detection using IR difference values */
         current_left_detected = check_threshold(current_left_raw,
             calibration.left_min, calibration.left_max, calibration.threshold_pct);
@@ -549,11 +522,7 @@ static void ir_thread_fn(void *p1, void *p2, void *p3)
 
             k_msgq_put(&obstacle_q, &info, K_NO_WAIT);
 
-            /* Play warning sound on new detection */
-            if ((current_left_detected && !prev_left) ||
-                (current_right_detected && !prev_right)) {
-                audio_play(SOUND_OBSTACLE);
-            }
+            /* Note: Obstacle sound disabled - display blink used instead */
 
             prev_left = current_left_detected;
             prev_right = current_right_detected;
@@ -661,18 +630,12 @@ void ir_sensors_start_calibration(void)
 
     calibrating = true;
 
-    /* Enable proximity beeping during calibration */
-    audio_proximity_enable(true);
-
     printk("IR calibration started - move obstacles close and away from sensors\n");
 }
 
 void ir_sensors_stop_calibration(void)
 {
     calibrating = false;
-
-    /* Disable proximity beeping */
-    audio_proximity_enable(false);
 
     /* Apply captured values (with some margin) */
     if (cal_left_max > cal_left_min + 100) {

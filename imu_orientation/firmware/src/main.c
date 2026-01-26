@@ -306,6 +306,16 @@ static int64_t emoji_start_time;
 static const struct mb_image *current_emoji;
 static bool emoji_visible;
 
+/* Proximity-based display blinking
+ * - >450mm: no blinking (constant display)
+ * - 150mm: 20Hz blinking (50ms period)
+ * - Linear interpolation in between */
+#define PROX_BLINK_FAR_MM    450   /* No blinking above this distance */
+#define PROX_BLINK_CLOSE_MM  150   /* Maximum blink rate at this distance */
+#define PROX_BLINK_MAX_HZ    20    /* Maximum blink frequency (20Hz = 50ms period) */
+static int64_t prox_blink_last_toggle;
+static bool prox_blink_display_on = true;
+
 /* ============================================================================
  * Display Update
  * ============================================================================ */
@@ -357,6 +367,75 @@ static bool update_emoji_flash(void)
     }
 
     return true;
+}
+
+/**
+ * Update proximity-based display blinking.
+ * Blinks the current display based on IR sensor distance.
+ * Returns the half-period in ms (0 = no blinking, display stays on).
+ */
+static uint32_t get_prox_blink_half_period_ms(void)
+{
+    float left_mm, right_mm;
+    ir_sensors_get_distance(&left_mm, &right_mm);
+
+    /* Use minimum distance (closest obstacle) */
+    float min_dist = (left_mm < right_mm) ? left_mm : right_mm;
+
+    if (min_dist >= PROX_BLINK_FAR_MM) {
+        return 0;  /* No blinking */
+    }
+
+    if (min_dist <= PROX_BLINK_CLOSE_MM) {
+        /* Maximum blink rate: 20Hz = 50ms period = 25ms half-period */
+        return 1000 / (2 * PROX_BLINK_MAX_HZ);
+    }
+
+    /* Linear interpolation: 450mm→0Hz, 150mm→20Hz */
+    float freq = PROX_BLINK_MAX_HZ *
+                 (PROX_BLINK_FAR_MM - min_dist) /
+                 (PROX_BLINK_FAR_MM - PROX_BLINK_CLOSE_MM);
+
+    if (freq < 1.0f) {
+        return 0;  /* Less than 1Hz, don't blink */
+    }
+
+    /* Half-period in ms */
+    return (uint32_t)(500.0f / freq);
+}
+
+/**
+ * Handle proximity-based display blinking.
+ * Returns true if display should be shown, false if blanked.
+ */
+static bool update_prox_blink(void)
+{
+    uint32_t half_period = get_prox_blink_half_period_ms();
+
+    if (half_period == 0) {
+        /* No blinking - ensure display is on */
+        if (!prox_blink_display_on) {
+            prox_blink_display_on = true;
+            current_display_state = -1;  /* Force refresh */
+        }
+        return true;
+    }
+
+    /* Check if it's time to toggle */
+    int64_t now = k_uptime_get();
+    if (now - prox_blink_last_toggle >= half_period) {
+        prox_blink_last_toggle = now;
+        prox_blink_display_on = !prox_blink_display_on;
+
+        if (prox_blink_display_on) {
+            current_display_state = -1;  /* Force refresh to show animation */
+        } else {
+            mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, SYS_FOREVER_MS,
+                             &img_blank, 1);
+        }
+    }
+
+    return prox_blink_display_on;
 }
 
 static void update_display_for_state(enum robot_state state)
@@ -867,9 +946,17 @@ int main(void)
         /* Update flashing emoji (if active) or normal display state */
         /* Skip display update during calibration (handled separately) */
         if (!sensors_is_calibrating() && !update_emoji_flash()) {
-            /* No emoji active, update display based on robot state */
-            enum robot_state state = robot_get_state();
-            update_display_for_state(state);
+            /* Check proximity-based blinking (only when connected) */
+            bool show_display = true;
+            if (robot_is_controller_connected()) {
+                show_display = update_prox_blink();
+            }
+
+            /* Update display based on robot state (only if not blanked by prox blink) */
+            if (show_display) {
+                enum robot_state state = robot_get_state();
+                update_display_for_state(state);
+            }
         }
 
         /* Handle magnetometer calibration */

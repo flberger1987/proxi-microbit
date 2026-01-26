@@ -11,8 +11,9 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/build/firmware"
-MCUBOOT_DIR="$SCRIPT_DIR/build/mcuboot"
+BUILD_DIR="$SCRIPT_DIR/build"
+APP_DIR="$BUILD_DIR/firmware"
+MCUBOOT_DIR="$BUILD_DIR/mcuboot"
 ZEPHYR_BASE="${ZEPHYR_BASE:-$HOME/zephyrproject/zephyr}"
 
 # Colors for output
@@ -42,20 +43,22 @@ check_dependencies() {
 }
 
 build_firmware() {
-    print_info "Building firmware..."
+    print_info "Building firmware with MCUboot (sysbuild)..."
 
     # Source Zephyr environment
     source "$ZEPHYR_BASE/zephyr-env.sh"
 
-    # Build application
-    west build -b bbc_microbit_v2 -d "$BUILD_DIR" "$SCRIPT_DIR" --pristine auto
+    # Build application with sysbuild (includes MCUboot)
+    west build -b bbc_microbit_v2 -d "$BUILD_DIR" --sysbuild "$SCRIPT_DIR" --pristine auto
 
-    if [ -f "$BUILD_DIR/zephyr/zephyr.signed.hex" ]; then
+    if [ -f "$APP_DIR/zephyr/zephyr.signed.hex" ]; then
         print_info "Build successful!"
-        print_info "  Application: $BUILD_DIR/zephyr/zephyr.signed.hex"
         print_info "  MCUboot:     $MCUBOOT_DIR/zephyr/zephyr.hex"
+        print_info "  Application: $APP_DIR/zephyr/zephyr.signed.hex"
+        print_info "  OTA Binary:  $APP_DIR/zephyr/zephyr.signed.bin"
     else
         print_error "Build failed - signed image not found"
+        print_info "Check build output for errors"
         exit 1
     fi
 }
@@ -75,7 +78,7 @@ flash_pyocd() {
         exit 1
     fi
 
-    if [ ! -f "$BUILD_DIR/zephyr/zephyr.signed.hex" ]; then
+    if [ ! -f "$APP_DIR/zephyr/zephyr.signed.hex" ]; then
         print_error "Application not found. Build first with: $0"
         exit 1
     fi
@@ -87,7 +90,7 @@ flash_pyocd() {
     pyocd flash -t nrf52833 -f 1000000 "$MCUBOOT_DIR/zephyr/zephyr.hex"
 
     print_info "Step 3/4: Flashing application..."
-    pyocd flash -t nrf52833 -f 1000000 "$BUILD_DIR/zephyr/zephyr.signed.hex"
+    pyocd flash -t nrf52833 -f 1000000 "$APP_DIR/zephyr/zephyr.signed.hex"
 
     print_info "Step 4/4: Resetting device..."
     pyocd reset -t nrf52833
@@ -103,13 +106,13 @@ flash_app_only() {
         exit 1
     fi
 
-    if [ ! -f "$BUILD_DIR/zephyr/zephyr.signed.hex" ]; then
+    if [ ! -f "$APP_DIR/zephyr/zephyr.signed.hex" ]; then
         print_error "Application not found. Build first with: $0"
         exit 1
     fi
 
     print_info "Flashing application..."
-    pyocd flash -t nrf52833 -f 1000000 "$BUILD_DIR/zephyr/zephyr.signed.hex"
+    pyocd flash -t nrf52833 -f 1000000 "$APP_DIR/zephyr/zephyr.signed.hex"
 
     print_info "Resetting device..."
     pyocd reset -t nrf52833
@@ -121,40 +124,30 @@ upload_ble() {
     print_info "Uploading via BLE (MCUmgr/SMP)..."
 
     # Check for signed binary
-    if [ ! -f "$BUILD_DIR/zephyr/zephyr.signed.bin" ]; then
+    if [ ! -f "$APP_DIR/zephyr/zephyr.signed.bin" ]; then
         print_error "Signed binary not found. Build first with: $0"
         exit 1
     fi
 
+    DEVICE_NAME="Ozzy"
+
     # Try smpmgr first, then mcumgr
     if command -v smpmgr &> /dev/null; then
         print_info "Using smpmgr..."
-        print_info "Scanning for device 'ProxiMicro'..."
-
-        # Get device address
-        DEVICE_ADDR=$(smpmgr scan --timeout 5 2>/dev/null | grep -i "proxi" | awk '{print $1}' | head -1)
-
-        if [ -z "$DEVICE_ADDR" ]; then
-            print_error "Device 'ProxiMicro' not found in BLE scan"
-            print_info "Make sure the device is powered on and advertising"
-            exit 1
-        fi
-
-        print_info "Found device at: $DEVICE_ADDR"
-        print_info "Uploading firmware..."
-        smpmgr --connstring "ble://$DEVICE_ADDR" image upload "$BUILD_DIR/zephyr/zephyr.signed.bin"
-
-        print_info "Confirming image..."
-        smpmgr --connstring "ble://$DEVICE_ADDR" image confirm
+        print_info "Uploading firmware to '$DEVICE_NAME'..."
+        smpmgr --connstring "ble,name=$DEVICE_NAME" image upload "$APP_DIR/zephyr/zephyr.signed.bin"
 
         print_info "Resetting device..."
-        smpmgr --connstring "ble://$DEVICE_ADDR" os reset
+        smpmgr --connstring "ble,name=$DEVICE_NAME" reset
 
     elif command -v mcumgr &> /dev/null; then
         print_info "Using mcumgr..."
-        print_warn "mcumgr requires manual device address"
-        print_info "Run: mcumgr --conntype ble --connstring <device-address> image upload $BUILD_DIR/zephyr/zephyr.signed.bin"
-        exit 1
+        print_info "Uploading firmware to '$DEVICE_NAME'..."
+        mcumgr --conntype ble --connstring "peer_name=$DEVICE_NAME" image upload "$APP_DIR/zephyr/zephyr.signed.bin"
+
+        print_info "Resetting device..."
+        mcumgr --conntype ble --connstring "peer_name=$DEVICE_NAME" reset
+
     else
         print_error "Neither smpmgr nor mcumgr found"
         print_info "Install smpmgr: pip install smpmgr"
@@ -162,13 +155,12 @@ upload_ble() {
         exit 1
     fi
 
-    print_info "BLE upload complete!"
+    print_info "BLE OTA update complete!"
 }
 
 clean_build() {
-    print_info "Cleaning build directories..."
+    print_info "Cleaning build directory..."
     rm -rf "$BUILD_DIR"
-    rm -rf "$MCUBOOT_DIR"
     print_info "Clean complete"
 }
 
@@ -176,11 +168,11 @@ show_usage() {
     echo "Usage: $0 [command]"
     echo ""
     echo "Commands:"
-    echo "  (none)      Build firmware only"
+    echo "  (none)      Build firmware with MCUboot (sysbuild)"
     echo "  flash       Build and flash via pyOCD (full flash: MCUboot + app)"
     echo "  flash-app   Flash application only (MCUboot must be present)"
-    echo "  ble         Upload new firmware via BLE (OTA DFU)"
-    echo "  clean       Remove build directories"
+    echo "  ble         Upload new firmware via BLE OTA (MCUmgr/SMP)"
+    echo "  clean       Remove build directory"
     echo ""
     echo "Flashing Order (pyOCD):"
     echo "  1. Chip erase"
@@ -190,8 +182,8 @@ show_usage() {
     echo ""
     echo "BLE OTA Update:"
     echo "  - Requires device already running with MCUboot + MCUmgr"
-    echo "  - Device must advertise SMP service"
-    echo "  - Uses smpmgr or mcumgr tool"
+    echo "  - Device name: 'Ozzy'"
+    echo "  - Uses smpmgr (pip install smpmgr) or mcumgr"
 }
 
 # Main

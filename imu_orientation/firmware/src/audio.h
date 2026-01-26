@@ -66,22 +66,6 @@ void audio_set_muted(bool muted);
  */
 bool audio_is_muted(void);
 
-/**
- * Enable/disable proximity beep mode (parking sensor style)
- * When enabled, beep rate is proportional to proximity.
- *
- * @param enable true to enable, false to disable
- */
-void audio_proximity_enable(bool enable);
-
-/**
- * Set proximity value for beeping
- * Closer = faster beeping, farther = slower beeping
- *
- * @param proximity_pct Proximity percentage (0 = far, 100 = very close)
- */
-void audio_proximity_set(uint16_t proximity_pct);
-
 /* Musical note frequencies (Hz) */
 #define NOTE_C4  262
 #define NOTE_D4  294

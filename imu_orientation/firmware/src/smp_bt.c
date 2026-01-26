@@ -15,7 +15,9 @@
 /* Track connection state */
 static struct bt_conn *current_conn;
 static volatile bool ble_connected;
-static volatile bool advertising_paused;  /* Paused during Xbox connection */
+
+/* Work item to restart advertising after connection (avoids callback issues) */
+static struct k_work_delayable adv_restart_work;
 
 /* Advertising data */
 static const struct bt_data ad[] = {
@@ -32,6 +34,20 @@ static const struct bt_data sd[] = {
             sizeof(CONFIG_BT_DEVICE_NAME) - 1),
 };
 
+/* Restart advertising work handler */
+static void adv_restart_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+
+    int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
+                               sd, ARRAY_SIZE(sd));
+    if (err && err != -EALREADY) {
+        printk("BLE: Advertising restart failed (err %d)\n", err);
+    } else {
+        printk("BLE: Advertising restarted (multi-connect)\n");
+    }
+}
+
 static void connected(struct bt_conn *conn, uint8_t err)
 {
     if (err) {
@@ -42,6 +58,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
     current_conn = bt_conn_ref(conn);
     ble_connected = true;
     printk("BLE: Connected\n");
+
+    /* Restart advertising after 100ms to allow additional connections */
+    k_work_schedule(&adv_restart_work, K_MSEC(100));
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -54,16 +73,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     }
     ble_connected = false;
 
-    /* Restart advertising only if not paused (e.g., during Xbox pairing) */
-    if (!advertising_paused) {
-        int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
-                                   sd, ARRAY_SIZE(sd));
-        if (err) {
-            printk("BLE: Advertising restart failed (err %d)\n", err);
-        }
-    } else {
-        printk("BLE: Advertising paused, not restarting\n");
-    }
+    /* Always restart advertising after disconnect */
+    k_work_schedule(&adv_restart_work, K_MSEC(100));
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -76,6 +87,9 @@ int smp_bt_init(void)
     int err;
 
     printk("BLE: Initializing...\n");
+
+    /* Initialize work item for delayed advertising restart */
+    k_work_init_delayable(&adv_restart_work, adv_restart_handler);
 
     /* Initialize Bluetooth */
     err = bt_enable(NULL);
@@ -103,7 +117,7 @@ int smp_bt_init(void)
         return err;
     }
 
-    printk("BLE: Advertising as '%s'\n", CONFIG_BT_DEVICE_NAME);
+    printk("BLE: Advertising as '%s' (permanent)\n", CONFIG_BT_DEVICE_NAME);
     return 0;
 }
 
@@ -114,23 +128,10 @@ bool smp_bt_is_connected(void)
 
 void smp_bt_pause_advertising(void)
 {
-    advertising_paused = true;
-    int err = bt_le_adv_stop();
-    if (err) {
-        printk("BLE: Advertising stop failed (err %d)\n", err);
-    } else {
-        printk("BLE: Advertising paused for Xbox pairing\n");
-    }
+    /* No-op: Advertising is now always active (permanent) */
 }
 
 void smp_bt_resume_advertising(void)
 {
-    advertising_paused = false;
-    int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
-                               sd, ARRAY_SIZE(sd));
-    if (err && err != -EALREADY) {
-        printk("BLE: Advertising resume failed (err %d)\n", err);
-    } else {
-        printk("BLE: Advertising resumed\n");
-    }
+    /* No-op: Advertising is now always active (permanent) */
 }

@@ -65,13 +65,20 @@ Der Proxi verwendet **zwei Motoren** mit H-Brücken-Steuerung:
 
 **WARNUNG**: Niemals beide Pins einer H-Brücke gleichzeitig HIGH setzen!
 
-### Weitere Pins (nicht verifiziert)
+### IR-Sensor-Pins (Verifiziert 2025-01-25)
 
-| micro:bit Pin | Proxi Funktion (vermutet) |
-|---------------|---------------------------|
-| P8 | IR Sensor Links |
-| P12 | IR Sensor Rechts |
-| P19/20 | I2C (reserviert) |
+| micro:bit Pin | nRF GPIO | ADC | Funktion |
+|---------------|----------|-----|----------|
+| P0 | P0.02 | AIN0 | IR Sensor Links |
+| P1 | P0.03 | AIN1 | IR Sensor Rechts |
+| P12 | P0.12 | GPIO | IR LED Enable (Active-HIGH) |
+| P19/20 | - | - | I2C (LSM303AGR) |
+
+**Messprinzip:**
+1. Messe ADC mit IR-LEDs AUS (Ambient-Licht)
+2. Schalte IR-LEDs EIN (P12=HIGH)
+3. Messe ADC mit IR-LEDs AN (Reflection)
+4. Differenz = tatsächlicher IR-Wert (eliminiert Fremdlicht)
 
 ## Standard-Programmierung
 

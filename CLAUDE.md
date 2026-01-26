@@ -798,11 +798,27 @@ Falls Bootloader beschädigt:
 ProxiMicro/
 ├── CLAUDE.md                           # Diese Datei (Developer Reference)
 ├── README.md                           # Projekt-Übersicht & Quick Start
+├── start_dashboard.sh                  # Telemetry Dashboard Startskript
 ├── controller_mapping.py               # Xbox Controller Mapping Reference
 ├── serial_monitor.py                   # Serial Port Monitor Tool
 │
 ├── tools/
-│   └── telemetry_receiver.py           # BLE Telemetry Empfänger (bleak)
+│   ├── telemetry_receiver.py           # BLE Telemetry Empfänger (bleak)
+│   ├── requirements.txt                # Python Dependencies
+│   │
+│   └── telemetry_gui/                  # PyQt6 Telemetry Dashboard
+│       ├── __init__.py
+│       ├── dashboard.py                # Haupt-Dashboard-Fenster
+│       ├── ble_bridge.py               # BLE-Qt Async Bridge
+│       └── widgets/                    # Dashboard Widgets
+│           ├── compass.py              # Kompass-Anzeige
+│           ├── heading_graph.py        # Heading-Verlauf Graph
+│           ├── ir_sensors.py           # IR Distanz-Anzeige
+│           ├── motor_output.py         # Motor-Balken
+│           ├── yaw_rate.py             # Yaw Rate Gauge
+│           ├── orientation.py          # Roll/Pitch Anzeige
+│           ├── status_panel.py         # Status-Panel
+│           └── thread_stats.py         # Thread CPU/Stack Statistiken
 │
 ├── imu_orientation/                    # IMU Orientierungs-Firmware
 │   ├── firmware/
@@ -968,22 +984,14 @@ Der Roboter kann autonom navigieren mit Heading-Hold und IR-basierter Hindernisv
 | Zustand | Wert | Beschreibung |
 |---------|------|--------------|
 | `AUTONAV_DISABLED` | 0 | Navigation deaktiviert, manuelle Steuerung |
-| `AUTONAV_YAW_TEST_CW` | 1 | Yaw-Test: Rotation im Uhrzeigersinn (5s) |
-| `AUTONAV_YAW_TEST_CCW` | 2 | Yaw-Test: Rotation gegen Uhrzeigersinn (5s) |
-| `AUTONAV_YAW_TEST_DONE` | 3 | Yaw-Test: Abgeschlossen, zeigt Ergebnisse |
-| `AUTONAV_HEADING_HOLD` | 4 | Fährt vorwärts, hält Ziel-Heading, vermeidet Hindernisse |
-| `AUTONAV_TURNING` | 5 | Dreht auf neues Ziel-Heading (proportionale Geschwindigkeit) |
-| `AUTONAV_BACKING_UP` | 6 | Fährt rückwärts (beide IR < 150mm), dann Wegdrehen |
+| `AUTONAV_HEADING_HOLD` | 1 | Fährt vorwärts mit kontinuierlicher Heading-Korrektur |
+| `AUTONAV_TURNING` | 2 | Dreht auf neues Ziel-Heading (in-place Rotation) |
+| `AUTONAV_SCANNING` | 3 | Hindernis erkannt: scannt links/rechts für besten Pfad |
 
 **Hindernisvermeidung (Kalman-gefiltert):**
-- **> 350mm**: Volle Geschwindigkeit (100%), nur Heading-Korrektur
-- **150-350mm**: Proportionale Vermeidung, reduzierte Geschwindigkeit
-- **< 150mm** (beide Seiten): Rückwärtsfahren, dann intelligentes Wegdrehen
-
-**Wegdrehverhalten nach Backup:**
-- Proportionaler Winkel basierend auf IR-Differenz (45°-135°)
-- Mehr Platz rechts → dreht nach rechts
-- Beide Seiten gleich eng → 180° U-Turn
+- **> 400mm**: Volle Geschwindigkeit (100%), nur Heading-Korrektur
+- **250-400mm**: Langsamer fahren, Hindernis nahe
+- **< 250mm**: Stoppen und scannen (AUTONAV_SCANNING)
 
 ### BLE Konfiguration
 
@@ -1042,7 +1050,7 @@ struct telemetry_packet {
 
     int8_t   motor_linear;       /* -100 bis +100 */
     int8_t   motor_angular;      /* -100 bis +100 */
-    uint8_t  nav_state;          /* 0=DISABLED, 1=HEADING_HOLD, 2=TURNING, 3=BACKING_UP */
+    uint8_t  nav_state;          /* 0=DISABLED, 1=HEADING_HOLD, 2=TURNING, 3=SCANNING */
     uint8_t  flags;              /* Bit 0: autonav, Bit 1: motors */
 
     uint16_t target_heading_x10; /* Ziel-Heading * 10 (0xFFFF = invalid) */
@@ -1263,11 +1271,6 @@ PWM-basierte Tongenerierung auf dem integrierten Lautsprecher (P0.00).
 | `SOUND_CALIBRATION_BEEP` | Kurzer Beep während Kalibrierung |
 | `SOUND_CALIBRATION_DONE` | Erfolgs-Jingle nach Kalibrierung |
 
-**Proximity Beeper:**
-- Parksensor-ähnliche Funktion
-- Beep-Rate proportional zur Nähe
-- Aktiviert sich automatisch bei IR < 300mm
-
 **Noten-Frequenzen (Hz):**
 ```c
 #define NOTE_C4  262
@@ -1395,6 +1398,12 @@ PID-basierte Regelung der Drehgeschwindigkeit mit Magnetometer-Feedback.
 | Erfolg | Häkchen |
 | Fehler | X |
 
+**Proximity-Warnung (Display-Blink):**
+- Ersetzt akustische Näherungs-Warnung durch visuelles Blinken
+- ≥450mm: konstant (kein Blinken)
+- 150mm: 20Hz Blinken (schnellste Rate)
+- Linearer Übergang zwischen 450mm und 150mm
+
 ### Build & Flash
 
 ```bash
@@ -1450,31 +1459,43 @@ Die Firmware verwendet mehrere Zephyr-Threads für Echtzeit-Verarbeitung:
 pip install pyserial bleak pygame PyOpenGL numpy
 ```
 
-**1. Telemetry Receiver** (`tools/telemetry_receiver.py`)
+**1. Telemetry Dashboard (GUI)** (`start_dashboard.sh`)
 ```bash
-# BLE Telemetrie-Pakete empfangen und parsen
-python tools/telemetry_receiver.py
+# PyQt6 Dashboard starten (empfohlen)
+./start_dashboard.sh
+
+# Oder direkt:
+python tools/telemetry_receiver.py --gui
 ```
 
-**2. Serial Monitor** (`serial_monitor.py`)
+**2. Telemetry Receiver (Console)** (`tools/telemetry_receiver.py`)
+```bash
+# BLE Telemetrie-Pakete empfangen und im Terminal anzeigen
+python tools/telemetry_receiver.py
+
+# Mit CSV-Logging:
+python tools/telemetry_receiver.py --log telemetry.csv
+```
+
+**3. Serial Monitor** (`serial_monitor.py`)
 ```bash
 # USB Serial Output anzeigen
 python serial_monitor.py
 ```
 
-**3. IMU Plot** (`imu_orientation/firmware/tools/imu_plot.py`)
+**4. IMU Plot** (`imu_orientation/firmware/tools/imu_plot.py`)
 ```bash
 # Echtzeit Roll/Pitch/Heading Plot
 python imu_orientation/firmware/tools/imu_plot.py
 ```
 
-**4. IR Plot** (`imu_orientation/firmware/tools/ir_plot.py`)
+**5. IR Plot** (`imu_orientation/firmware/tools/ir_plot.py`)
 ```bash
 # IR Sensor Werte plotten
 python imu_orientation/firmware/tools/ir_plot.py
 ```
 
-**5. 3D Visualizer** (`imu_orientation/visualizer/`)
+**6. 3D Visualizer** (`imu_orientation/visualizer/`)
 ```bash
 cd imu_orientation/visualizer
 pip install -r requirements.txt

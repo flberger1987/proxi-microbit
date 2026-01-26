@@ -36,11 +36,6 @@ static const struct pwm_dt_spec speaker = {0};
 static volatile bool is_playing = false;
 static volatile bool is_muted = false;  /* Mutes regular sounds during calibration */
 
-/* Proximity beep state (parking sensor style) */
-static volatile bool proximity_enabled = false;
-static volatile uint16_t proximity_value = 0;  /* 0=far, 100=close */
-static volatile int64_t last_beep_time = 0;
-
 /* ============================================================================
  * Internal Functions
  * ============================================================================ */
@@ -340,74 +335,4 @@ void audio_stop(void)
 bool audio_is_playing(void)
 {
     return is_playing;
-}
-
-void audio_proximity_enable(bool enable)
-{
-    proximity_enabled = enable;
-    if (!enable) {
-        set_tone(0);  /* Silence when disabled */
-        proximity_value = 0;
-    }
-    printk("Audio: Proximity beep %s\n", enable ? "enabled" : "disabled");
-}
-
-void audio_proximity_set(uint16_t proximity_pct)
-{
-    if (!proximity_enabled) {
-        return;
-    }
-
-    /* Clamp to 0-100 */
-    if (proximity_pct > 100) {
-        proximity_pct = 100;
-    }
-    proximity_value = proximity_pct;
-
-    /*
-     * Calculate beep interval:
-     * - 0% → silence (no beep!)
-     * - 1-94% → 1000ms down to 80ms interval
-     * - 95-100% → continuous tone
-     */
-    int64_t now = k_uptime_get();
-
-    /* 0% = silence */
-    if (proximity_pct == 0) {
-        if (is_playing) {
-            set_tone(0);
-            is_playing = false;
-        }
-        return;
-    }
-
-    /* 95%+ = continuous tone */
-    if (proximity_pct >= 95) {
-        if (!is_playing) {
-            set_tone(NOTE_A4);
-            is_playing = true;
-        }
-        last_beep_time = now;
-        return;
-    }
-
-    /* 1-94% = interval beeping */
-    /* Linear: 1000ms at 1%, 80ms at 94% */
-    uint32_t interval_ms = 1000 - ((proximity_pct - 1) * 920) / 93;
-
-    /* Turn off continuous tone if we moved away */
-    if (is_playing) {
-        set_tone(0);
-        is_playing = false;
-    }
-
-    /* Check if it's time for next beep */
-    int64_t elapsed = now - last_beep_time;
-    if (elapsed >= interval_ms) {
-        /* Short beep: 18ms tone */
-        set_tone(NOTE_A4);
-        k_msleep(18);
-        set_tone(0);
-        last_beep_time = now;
-    }
 }

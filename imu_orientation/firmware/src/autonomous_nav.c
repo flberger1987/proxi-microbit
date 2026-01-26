@@ -189,9 +189,19 @@ static void process_heading_hold(void)
 
     /* Obstacle too close: stop and scan for clear path */
     if (min_dist < OBSTACLE_DIST_STOP) {
-        printk("AUTONAV: Obstacle at %.0f mm, starting scan\n", (double)min_dist);
+        /* Choose initial scan direction based on which side has more space
+         * scan_phase 0 = CCW (left), scan_phase 1 = CW (right)
+         */
+        if (left_mm > right_mm) {
+            scan_phase = 0;  /* More space on left → scan left (CCW) first */
+            printk("AUTONAV: Obstacle! L=%.0f R=%.0f → scanning LEFT\n",
+                   (double)left_mm, (double)right_mm);
+        } else {
+            scan_phase = 1;  /* More space on right → scan right (CW) first */
+            printk("AUTONAV: Obstacle! L=%.0f R=%.0f → scanning RIGHT\n",
+                   (double)left_mm, (double)right_mm);
+        }
         scan_origin_heading = get_current_heading();
-        scan_phase = 0;  /* Start scanning left (CCW) */
         yaw_controller_set_target(0.0f);
         transition_to(AUTONAV_SCANNING);
         return;
@@ -305,6 +315,7 @@ static void process_turning(void)
 #define SCAN_YAW_RATE       10.0f   /* Slow scan speed (°/s) */
 #define SCAN_CLEAR_DIST     400.0f  /* Distance threshold for "clear" (mm) */
 #define SCAN_MAX_ANGLE      180.0f  /* Maximum scan angle before giving up */
+#define SCAN_EXTRA_ANGLE    20.0f   /* Extra turn angle after finding clear path (°) */
 
 /**
  * Process scanning state - continuous slow scan to find clear path
@@ -334,11 +345,17 @@ static void process_scanning(void)
 
     /* Check if we found a clear path */
     if (min_dist >= SCAN_CLEAR_DIST) {
-        printk("SCAN: Found clear path at heading %.0f (dist=%.0f mm)\n",
-               (double)current, (double)min_dist);
+        /* Add extra angle in scan direction for more clearance
+         * scan_phase 0 = CCW (heading increases) → add positive offset
+         * scan_phase 1 = CW (heading decreases) → add negative offset
+         */
+        float extra = (scan_phase == 0) ? SCAN_EXTRA_ANGLE : -SCAN_EXTRA_ANGLE;
+        float new_heading = normalize_heading(current + extra);
+        printk("SCAN: Found clear path at %.0f, turning to %.0f (+%.0f°)\n",
+               (double)current, (double)new_heading, (double)extra);
         yaw_controller_set_target(0.0f);
-        target_heading = current;
-        transition_to(AUTONAV_HEADING_HOLD);
+        target_heading = new_heading;
+        transition_to(AUTONAV_TURNING);  /* Turn to new heading first */
         return;
     }
 

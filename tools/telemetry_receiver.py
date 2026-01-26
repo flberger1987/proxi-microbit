@@ -136,6 +136,11 @@ def format_telemetry(pkt: dict) -> str:
     ]
     if pkt['target_heading'] is not None:
         lines.append(f"  Target: {pkt['target_heading']:.1f}\u00b0")
+    # Raw sensor data
+    a = pkt['raw_accel']
+    m = pkt['raw_mag']
+    lines.append(f"  Accel: {a[0]:+5d} {a[1]:+5d} {a[2]:+5d} mg")
+    lines.append(f"  Mag:   {m[0]:+5d} {m[1]:+5d} {m[2]:+5d} mG")
     return '\n'.join(lines)
 
 

@@ -1,0 +1,8 @@
+# Telemetry Receiver Dependencies
+bleak>=0.21
+numpy>=1.20
+
+# GUI Dependencies (for --gui mode)
+PyQt6>=6.4
+pyqtgraph>=0.13
+qasync>=0.24

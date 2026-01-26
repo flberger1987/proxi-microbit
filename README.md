@@ -99,8 +99,9 @@ Der Proxi ist ein **Hexapod** (6-Bein-Roboter) mit zwei Motoren:
 | Pin | Funktion |
 |-----|----------|
 | P0.00 | Speaker (PWM1 CH0) |
-| P8 (P0.10) | IR Sensor Links (ADC) |
-| P12 (P0.12) | IR Sensor Rechts (ADC) |
+| P0 (P0.02) | IR Sensor Links (ADC AIN0) |
+| P1 (P0.03) | IR Sensor Rechts (ADC AIN1) |
+| P12 (P0.12) | IR LED Enable (Active-HIGH) |
 | P19/P20 | I2C (LSM303AGR) |
 
 ---
@@ -113,11 +114,21 @@ Der Proxi ist ein **Hexapod** (6-Bein-Roboter) mit zwei Motoren:
 |------------|----------------|
 | **Linker Stick Y** | Vorwärts/Rückwärts |
 | **Linker Stick X** | Links/Rechts drehen |
-| **Rechter Trigger (RT)** | Gas (Geschwindigkeitsmodifikator) |
-| **A-Button** | Sound: Schuss |
-| **B-Button** | Sound: Klick |
-| **X-Button** | Sound: Maschinengewehr |
-| **Y-Button** | Sound: Hindernis-Warnung |
+| **Rechter Trigger (RT)** | Yaw Rate Control (Rechtsdrehung) |
+| **Linker Trigger (LT)** | Yaw Rate Control (Linksdrehung) |
+| **D-Pad UP** | Autonomous Mode aktivieren |
+| **D-Pad DOWN** | 180° U-Turn (im Auto-Mode) |
+| **D-Pad LEFT/RIGHT** | ±90° Drehung (im Auto-Mode) |
+| **A-Button** | Sound: Schuss + Emoji |
+| **B-Button** | Sound: Maschinengewehr + Emoji |
+| **X-Button** | Emoji: Überrascht |
+| **Y-Button** | Emoji: Traurig |
+| **LB + RB** | Emergency Stop! |
+| **L3 + R3** | Emergency Stop! |
+
+### Autonomous Mode
+
+D-Pad UP aktiviert den autonomen Modus. Der Roboter fährt selbstständig vorwärts und vermeidet Hindernisse. Manual Override (Stick/Trigger > 10%) beendet den Modus.
 
 ### PS5 DualSense (kompatibel)
 
@@ -212,18 +223,19 @@ Byte 15:    Reserved
 
 ### micro:bit Tasten
 
-| Taste | Kurz drücken | Lang drücken (1s) |
-|-------|--------------|-------------------|
-| **A** | Klick-Sound | Pairing starten/beenden |
-| **B** | Klick-Sound | Emergency Stop |
+| Taste | Kurz drücken | Lang drücken |
+|-------|--------------|--------------|
+| **A** | - | **1s**: BLE Pairing starten/stoppen |
+| **B** | GPIO-Test weiterschalten | **3s**: Magnetometer-Kalibrierung |
 
 ### Display-Anzeigen
 
 | Animation | Bedeutung |
 |-----------|-----------|
-| Pulsierendes Herz | Idle - Warte auf Pairing |
-| Rotierender Punkt | Pairing-Modus aktiv |
+| Pulsierendes Herz | Idle - Warte auf Controller |
+| Rotierender Punkt | Scanning - sucht Controller |
 | Blinkende Augen | Controller verbunden |
+| Pfeil nach vorne | Autonomous Mode aktiv |
 | Haken (✓) | Aktion erfolgreich |
 | X-Kreuz | Fehler |
 
@@ -377,7 +389,13 @@ Beispiel: `IMU,12345,2.5,-1.2,180.3`
 ProxiMicro/
 ├── README.md                    # Diese Datei
 ├── CLAUDE.md                    # Entwickler-Referenz
+├── start_dashboard.sh           # Telemetry Dashboard starten
 ├── .gitignore
+│
+├── tools/
+│   ├── telemetry_receiver.py    # BLE Telemetry (Console + GUI)
+│   ├── requirements.txt         # Python Dependencies
+│   └── telemetry_gui/           # PyQt6 Dashboard Widgets
 │
 ├── imu_orientation/
 │   └── firmware/
@@ -451,8 +469,7 @@ CONFIG_MICROBIT_DISPLAY=y
 
 1. **BLE Range:** ~10m indoor (typisch für BLE)
 2. **Controller-Latenz:** ~120ms (BLE HID Report Rate)
-3. **IR-Sensoren:** Noch nicht implementiert
-4. **OTA-Update:** MCUboot derzeit deaktiviert
+3. **OTA-Update:** MCUboot derzeit deaktiviert
 
 ---
 
@@ -472,4 +489,4 @@ SPDX-License-Identifier: Apache-2.0
 
 ---
 
-*Dokumentation Stand: 2025-01-25*
+*Dokumentation Stand: 2026-01-26*

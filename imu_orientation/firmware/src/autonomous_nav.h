@@ -45,7 +45,7 @@ enum autonav_state {
 #define TURNING_MIN_YAW_RATE    10.0f  /* Minimum yaw rate for turning (°/s) */
 
 /* Obstacle parameters */
-#define OBSTACLE_DIST_STOP       200.0f  /* Stop and scan if closer than this (mm) */
+#define OBSTACLE_DIST_STOP       250.0f  /* Stop and scan if closer than this (mm) */
 #define OBSTACLE_DIST_SLOW       400.0f  /* Slow down if closer than this (mm) */
 
 /* Scanning parameters */

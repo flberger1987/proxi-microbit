@@ -210,9 +210,7 @@ static void motor_thread_fn(void *p1, void *p2, void *p3)
             } else {
                 current_linear = cmd.linear;
                 current_angular = cmd.angular;
-                /* Update telemetry values */
-                current_cmd_linear = (int8_t)cmd.linear;
-                current_cmd_angular = (int8_t)cmd.angular;
+                /* Note: telemetry values updated below with actual motor output */
             }
         }
 
@@ -247,6 +245,10 @@ static void motor_thread_fn(void *p1, void *p2, void *p3)
 
             set_walk_motor(current_linear);
             set_turn_motor(angular_output);
+
+            /* Update telemetry with ACTUAL output (not input command) */
+            current_cmd_linear = (int8_t)current_linear;
+            current_cmd_angular = (int8_t)angular_output;
 
             /* Feed motor command to Kalman filter for prediction */
             sensors_set_motor_cmd((float)angular_output);
