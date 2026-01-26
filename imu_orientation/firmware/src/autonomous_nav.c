@@ -29,22 +29,20 @@ static struct k_thread autonav_thread_data;
 static k_tid_t autonav_thread_id;
 
 /* ============================================================================
- * State Variables
+ * State Variables (protected by autonav_mutex)
  * ============================================================================ */
 
-static volatile enum autonav_state current_state = AUTONAV_DISABLED;
-static volatile bool enabled = false;
+/* Mutex for thread-safe access to autonav state */
+static K_MUTEX_DEFINE(autonav_mutex);
+
+static enum autonav_state current_state = AUTONAV_DISABLED;
+static bool enabled = false;
 
 /* Timing for state transitions */
 static int64_t state_start_time;
 
 /* Heading-hold target (degrees, 0-360) */
 static float target_heading;
-
-/* Yaw test tracking */
-static float yaw_test_start_heading;
-static float yaw_test_cw_delta;
-static float yaw_test_ccw_delta;
 
 /* ============================================================================
  * Helper Functions
@@ -64,18 +62,6 @@ static inline float abs_f(float x)
 static float get_current_heading(void)
 {
     return sensors_get_heading();
-}
-
-/**
- * Get full orientation for logging
- */
-static void get_current_orientation(float *roll, float *pitch, float *heading)
-{
-    struct orientation_data orient;
-    sensors_get_orientation(&orient);
-    *roll = orient.roll;
-    *pitch = orient.pitch;
-    *heading = orient.heading;
 }
 
 /**
@@ -136,20 +122,7 @@ static void set_motor_for_state(enum autonav_state state)
         cmd.angular = 0;
         break;
 
-    case AUTONAV_YAW_TEST_CW:
-        /* Clockwise rotation at full speed */
-        cmd.linear = 0;
-        cmd.angular = AUTONAV_YAW_TEST_SPEED;
-        break;
-
-    case AUTONAV_YAW_TEST_CCW:
-        /* Counter-clockwise rotation at full speed */
-        cmd.linear = 0;
-        cmd.angular = -AUTONAV_YAW_TEST_SPEED;
-        break;
-
     case AUTONAV_DISABLED:
-    case AUTONAV_YAW_TEST_DONE:
     default:
         /* Stop motors */
         cmd.linear = 0;
@@ -163,6 +136,9 @@ static void set_motor_for_state(enum autonav_state state)
 
 /**
  * Transition to a new state
+ * Note: For AUTONAV_TURNING, we don't send an immediate motor command
+ * because process_turning() needs to calculate the proper angular velocity.
+ * Sending {0,0} here would cause a brief stop (Bug #1 fix).
  */
 static void transition_to(enum autonav_state new_state)
 {
@@ -170,79 +146,12 @@ static void transition_to(enum autonav_state new_state)
         printk("AUTONAV: %d -> %d\n", current_state, new_state);
         current_state = new_state;
         state_start_time = k_uptime_get();
-        set_motor_for_state(new_state);
-    }
-}
 
-/* ============================================================================
- * Yaw Test Logic
- * ============================================================================ */
-
-static void process_yaw_test(void)
-{
-    int64_t elapsed = k_uptime_get() - state_start_time;
-    float roll, pitch, heading;
-    get_current_orientation(&roll, &pitch, &heading);
-
-    switch (current_state) {
-    case AUTONAV_YAW_TEST_CW:
-        /* Log all axes every 100ms to verify which one changes */
-        if ((elapsed % 100) < 50) {
-            printk("YAW_CW: R=%+6.1f P=%+6.1f H=%+6.1f (%lldms)\n",
-                   (double)roll, (double)pitch, (double)heading, elapsed);
+        /* Don't send motor command for TURNING - process_turning() handles it
+         * This prevents the 50ms stop gap that caused Bug #1 */
+        if (new_state != AUTONAV_TURNING) {
+            set_motor_for_state(new_state);
         }
-
-        /* After duration, record delta and switch to CCW */
-        if (elapsed >= AUTONAV_YAW_TEST_DURATION) {
-            yaw_test_cw_delta = heading_delta(yaw_test_start_heading, heading);
-            printk("YAW_CW complete: heading delta=%.1f degrees\n", (double)yaw_test_cw_delta);
-
-            /* Start CCW phase */
-            yaw_test_start_heading = heading;
-            transition_to(AUTONAV_YAW_TEST_CCW);
-        }
-        break;
-
-    case AUTONAV_YAW_TEST_CCW:
-        /* Log all axes every 100ms */
-        if ((elapsed % 100) < 50) {
-            printk("YAW_CCW: R=%+6.1f P=%+6.1f H=%+6.1f (%lldms)\n",
-                   (double)roll, (double)pitch, (double)heading, elapsed);
-        }
-
-        /* After duration, record delta and finish */
-        if (elapsed >= AUTONAV_YAW_TEST_DURATION) {
-            yaw_test_ccw_delta = heading_delta(yaw_test_start_heading, heading);
-            printk("YAW_CCW complete: heading delta=%.1f degrees\n", (double)yaw_test_ccw_delta);
-
-            /* Print summary */
-            printk("\n========== YAW TEST RESULTS ==========\n");
-            printk("CW rotation (1s):  heading change = %+.1f degrees\n",
-                   (double)yaw_test_cw_delta);
-            printk("CCW rotation (1s): heading change = %+.1f degrees\n",
-                   (double)yaw_test_ccw_delta);
-            printk("\nExpected: CW->positive, CCW->negative\n");
-            if (yaw_test_cw_delta > 0 && yaw_test_ccw_delta < 0) {
-                printk("RESULT: IMU heading axis is CORRECT!\n");
-            } else if (yaw_test_cw_delta < 0 && yaw_test_ccw_delta > 0) {
-                printk("RESULT: IMU heading axis is INVERTED!\n");
-            } else {
-                printk("RESULT: INCONCLUSIVE (check IMU orientation)\n");
-            }
-            printk("=======================================\n\n");
-
-            /* Play success sound and return to disabled */
-            audio_play(SOUND_CONNECTED);
-            transition_to(AUTONAV_YAW_TEST_DONE);
-
-            /* After brief pause, return to disabled */
-            k_msleep(500);
-            transition_to(AUTONAV_DISABLED);
-        }
-        break;
-
-    default:
-        break;
     }
 }
 
@@ -262,7 +171,11 @@ static inline int16_t clamp_i16(int16_t val, int16_t min, int16_t max)
 
 /**
  * Process heading-hold state - drive forward while maintaining target heading
- * Uses Kalman-filtered IR distance for proportional obstacle avoidance
+ *
+ * New strategy (stop-turn-go):
+ * - Drive straight forward if heading error < 10°
+ * - If heading error >= 10°: stop, turn to correct heading, then resume
+ * - Obstacle avoidance still applies (may trigger BACKING_UP)
  */
 static void process_heading_hold(void)
 {
@@ -281,34 +194,34 @@ static void process_heading_hold(void)
         return;
     }
 
-    /* Calculate base heading correction
-     * Note: positive angular = turn right (CW) = heading decreases
-     *       negative angular = turn left (CCW) = heading increases
-     * If target > current (error > 0), we need CCW to increase heading → negative angular
-     */
+    /* Check heading error */
     float current = get_current_heading();
     float heading_error = heading_delta(target_heading, current);
-    float angular_heading = -heading_error * HEADING_KP;  /* Negate: error>0 needs CCW (negative) */
 
-    /* Debug: Log heading correction every ~1 second */
+    /* Debug: Log heading every ~1 second */
     static int debug_counter = 0;
     if (++debug_counter >= 20) {  /* 20 * 50ms = 1s */
         debug_counter = 0;
-        printk("HEADING: target=%.1f current=%.1f error=%+.1f angular=%+.1f\n",
-               (double)target_heading, (double)current,
-               (double)heading_error, (double)angular_heading);
+        printk("HEADING: target=%.1f current=%.1f error=%+.1f\n",
+               (double)target_heading, (double)current, (double)heading_error);
     }
 
-    /* Calculate obstacle avoidance correction */
-    float angular_avoid = 0.0f;
+    /* If heading error > threshold: stop and turn to correct */
+    if (abs_f(heading_error) > HEADING_CORRECTION_THRESHOLD) {
+        printk("AUTONAV: Heading drift %.1f° > %.1f°, stopping to correct\n",
+               (double)abs_f(heading_error), (double)HEADING_CORRECTION_THRESHOLD);
+        transition_to(AUTONAV_TURNING);
+        return;
+    }
+
+    /* Calculate obstacle avoidance correction (only angular, no heading correction) */
+    int16_t angular = 0;
 
     if (min_dist < OBSTACLE_DIST_AVOID) {
         /*
          * Proportional avoidance based on distance difference:
          * - diff > 0 → right has more space → turn right (positive angular)
          * - diff < 0 → left has more space → turn left (negative angular)
-         *
-         * Strength increases as obstacle gets closer
          */
         float diff = right_mm - left_mm;
 
@@ -318,20 +231,17 @@ static void process_heading_hold(void)
             float proximity_factor = 1.0f - (min_dist / OBSTACLE_DIST_AVOID);
             proximity_factor = (proximity_factor < 0.0f) ? 0.0f : proximity_factor;
 
-            angular_avoid = diff * OBSTACLE_KP_AVOID * (1.0f + proximity_factor);
+            float angular_avoid = diff * OBSTACLE_KP_AVOID * (1.0f + proximity_factor);
+            angular = clamp_i16((int16_t)angular_avoid,
+                                -AUTONAV_SPEED_ANGULAR, AUTONAV_SPEED_ANGULAR);
 
-            printk("AUTONAV: Avoid L=%.0f R=%.0f diff=%+.0f → angular=%+.1f\n",
-                   (double)left_mm, (double)right_mm, (double)diff, (double)angular_avoid);
+            printk("AUTONAV: Avoid L=%.0f R=%.0f diff=%+.0f → angular=%+d\n",
+                   (double)left_mm, (double)right_mm, (double)diff, angular);
         }
     }
 
-    /* Combine heading hold + obstacle avoidance */
-    float angular_total = angular_heading + angular_avoid;
-    int16_t angular = clamp_i16((int16_t)angular_total,
-                                -AUTONAV_SPEED_ANGULAR, AUTONAV_SPEED_ANGULAR);
-
-    /* Reduce forward speed when avoiding (proportional to avoidance effort) */
-    float speed_factor = 1.0f - (abs_f(angular_avoid) / (float)AUTONAV_SPEED_ANGULAR) * 0.5f;
+    /* Drive forward (reduce speed when avoiding) */
+    float speed_factor = 1.0f - (abs_f((float)angular) / (float)AUTONAV_SPEED_ANGULAR) * 0.5f;
     if (speed_factor < 0.3f) speed_factor = 0.3f;
     int16_t linear = (int16_t)(AUTONAV_SPEED_LINEAR * speed_factor);
 
@@ -523,13 +433,6 @@ static void autonav_thread_fn(void *p1, void *p2, void *p3)
     while (1) {
         k_msleep(AUTONAV_UPDATE_INTERVAL_MS);
 
-        /* Handle yaw test states */
-        if (current_state == AUTONAV_YAW_TEST_CW ||
-            current_state == AUTONAV_YAW_TEST_CCW) {
-            process_yaw_test();
-            continue;
-        }
-
         /* Skip if disabled */
         if (!enabled || current_state == AUTONAV_DISABLED) {
             continue;
@@ -577,7 +480,10 @@ void autonav_start_thread(void)
 
 void autonav_enable(void)
 {
+    k_mutex_lock(&autonav_mutex, K_FOREVER);
+
     if (enabled) {
+        k_mutex_unlock(&autonav_mutex);
         return;  /* Already enabled */
     }
 
@@ -586,13 +492,20 @@ void autonav_enable(void)
 
     printk("AUTONAV: Enabled, target heading=%.1f\n", (double)target_heading);
     enabled = true;
-    audio_play(SOUND_PAIRING_START);  /* Ascending tone */
     transition_to(AUTONAV_HEADING_HOLD);
+
+    k_mutex_unlock(&autonav_mutex);
+
+    /* Play sound outside mutex to avoid blocking */
+    audio_play(SOUND_PAIRING_START);
 }
 
 void autonav_disable(void)
 {
+    k_mutex_lock(&autonav_mutex, K_FOREVER);
+
     if (!enabled && current_state == AUTONAV_DISABLED) {
+        k_mutex_unlock(&autonav_mutex);
         return;  /* Already disabled */
     }
 
@@ -600,80 +513,63 @@ void autonav_disable(void)
     enabled = false;
     transition_to(AUTONAV_DISABLED);
 
-    /* Stop motors */
-    motor_emergency_stop();
+    k_mutex_unlock(&autonav_mutex);
 
-    audio_play(SOUND_DISCONNECTED);  /* Descending tone */
+    /* Stop motors and play sound outside mutex */
+    motor_emergency_stop();
+    audio_play(SOUND_DISCONNECTED);
 }
 
 bool autonav_is_enabled(void)
 {
-    return enabled;
+    k_mutex_lock(&autonav_mutex, K_FOREVER);
+    bool result = enabled;
+    k_mutex_unlock(&autonav_mutex);
+    return result;
 }
 
 enum autonav_state autonav_get_state(void)
 {
-    return current_state;
-}
-
-void autonav_start_yaw_test(void)
-{
-    /* Only start if not already running */
-    if (current_state == AUTONAV_YAW_TEST_CW ||
-        current_state == AUTONAV_YAW_TEST_CCW) {
-        printk("AUTONAV: Yaw test already running\n");
-        return;
-    }
-
-    /* Disable autonomous mode if enabled */
-    if (enabled) {
-        enabled = false;
-    }
-
-    float roll, pitch, heading;
-    get_current_orientation(&roll, &pitch, &heading);
-
-    printk("\n========== STARTING YAW TEST ==========\n");
-    printk("Phase 1: Rotate CW for 5 seconds at 100%% PWM\n");
-    printk("Phase 2: Rotate CCW for 5 seconds at 100%% PWM\n");
-    printk("Watching all axes: R=Roll, P=Pitch, H=Heading\n");
-    printk("Initial: R=%+.1f P=%+.1f H=%+.1f\n",
-           (double)roll, (double)pitch, (double)heading);
-    printk("=======================================\n\n");
-
-    audio_play(SOUND_BUTTON_PRESS);
-
-    /* Record starting heading */
-    yaw_test_start_heading = heading;
-    yaw_test_cw_delta = 0;
-    yaw_test_ccw_delta = 0;
-
-    /* Start CW rotation */
-    transition_to(AUTONAV_YAW_TEST_CW);
-}
-
-bool autonav_is_yaw_test_running(void)
-{
-    return (current_state == AUTONAV_YAW_TEST_CW ||
-            current_state == AUTONAV_YAW_TEST_CCW ||
-            current_state == AUTONAV_YAW_TEST_DONE);
+    k_mutex_lock(&autonav_mutex, K_FOREVER);
+    enum autonav_state result = current_state;
+    k_mutex_unlock(&autonav_mutex);
+    return result;
 }
 
 void autonav_manual_override(void)
 {
+    k_mutex_lock(&autonav_mutex, K_FOREVER);
+
     if (!enabled) {
+        k_mutex_unlock(&autonav_mutex);
         return;  /* Not in autonomous mode */
     }
 
     printk("AUTONAV: Manual override detected!\n");
-    autonav_disable();
-    audio_play(SOUND_OBSTACLE);  /* Warning beep */
+    enabled = false;
+    transition_to(AUTONAV_DISABLED);
+
+    k_mutex_unlock(&autonav_mutex);
+
+    /* Stop motors and play sound outside mutex */
+    motor_emergency_stop();
+    audio_play(SOUND_OBSTACLE);
 }
 
 void autonav_turn_relative(int16_t degrees)
 {
+    k_mutex_lock(&autonav_mutex, K_FOREVER);
+
     if (!enabled) {
+        k_mutex_unlock(&autonav_mutex);
         printk("AUTONAV: Turn ignored (not enabled)\n");
+        return;
+    }
+
+    /* Ignore if already turning */
+    if (current_state == AUTONAV_TURNING) {
+        k_mutex_unlock(&autonav_mutex);
+        printk("AUTONAV: Turn ignored (already turning)\n");
         return;
     }
 
@@ -684,16 +580,25 @@ void autonav_turn_relative(int16_t degrees)
            degrees, (double)target_heading);
 
     /* Transition to turning state */
-    audio_play(SOUND_BUTTON_PRESS);
     transition_to(AUTONAV_TURNING);
+
+    k_mutex_unlock(&autonav_mutex);
+
+    /* Play sound outside mutex */
+    audio_play(SOUND_BUTTON_PRESS);
 }
 
 float autonav_get_target_heading(void)
 {
-    if (!enabled ||
-        (current_state != AUTONAV_HEADING_HOLD &&
-         current_state != AUTONAV_TURNING)) {
-        return -1.0f;
+    k_mutex_lock(&autonav_mutex, K_FOREVER);
+
+    float result = -1.0f;
+    if (enabled &&
+        (current_state == AUTONAV_HEADING_HOLD ||
+         current_state == AUTONAV_TURNING)) {
+        result = target_heading;
     }
-    return target_heading;
+
+    k_mutex_unlock(&autonav_mutex);
+    return result;
 }

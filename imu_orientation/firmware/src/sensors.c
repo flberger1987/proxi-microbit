@@ -82,9 +82,14 @@ static const int sg_coeff[SG_WINDOW_SIZE] = {-2, -1, 0, 1, 2};
 /* Motor model parameters
  * τ_up = 1.3s (acceleration - from sysid)
  * τ_down = 0.3s (deceleration - faster due to friction)
+ *
+ * Sign convention:
+ *   motor_cmd > 0 → CW (right turn) → heading DECREASES
+ *   motor_cmd < 0 → CCW (left turn) → heading INCREASES
+ *   Therefore MOTOR_K must be NEGATIVE!
  */
 #define MOTOR_TAU    0.3f          /* Time constant for stopping (faster) */
-#define MOTOR_K      0.4f          /* Gain: °/s per PWM% */
+#define MOTOR_K      (-0.4f)       /* Gain: °/s per PWM% (NEGATIVE: CW = heading decreases) */
 #define DT           0.1f          /* Sample time: 100ms */
 
 /* Discretized model coefficient for ω dynamics */
@@ -291,7 +296,14 @@ float sensors_get_heading(void)
 
 float sensors_get_yaw_rate(void)
 {
-    return filtered_yaw_rate;
+    /* Return yaw rate in MOTOR convention:
+     *   positive = CW (turn right) = heading decreasing
+     *   negative = CCW (turn left) = heading increasing
+     *
+     * Kalman internally uses PHYSICS convention (positive = CCW).
+     * We negate to convert to motor convention for the yaw controller.
+     */
+    return -filtered_yaw_rate;
 }
 
 void sensors_get_orientation(struct orientation_data *out)
