@@ -303,6 +303,8 @@ float mz = -my_raw;
 
 Der Kosmos Proxi ist ein **Hexapod** (6-Bein-Roboter), kein Radfahrzeug!
 
+**Motor-Pins:**
+
 | micro:bit Pin | GPIO | Proxi Funktion |
 |---------------|------|----------------|
 | P13 | P0.17 | Hexapod Vorwärts gehen |
@@ -310,10 +312,23 @@ Der Kosmos Proxi ist ein **Hexapod** (6-Bein-Roboter), kein Radfahrzeug!
 | P15 | P0.13 | Hexapod Links drehen |
 | P16 | P1.02 | Hexapod Rechts drehen |
 
+**IR-Sensor-Pins:**
+
+| micro:bit Pin | GPIO | ADC | Proxi Funktion |
+|---------------|------|-----|----------------|
+| P0 | P0.02 | AIN0 | IR Sensor Links |
+| P1 | P0.03 | AIN1 | IR Sensor Rechts |
+| P12 | P0.12 | GPIO | IR LED Enable (Active-HIGH) |
+
 **Motor-Konfiguration:**
 - **Geh-Motor:** H-Brücke mit P13 (vorwärts) / P14 (rückwärts)
 - **Dreh-Motor:** H-Brücke mit P15 (links) / P16 (rechts)
 - Nur ein Pin pro Richtung HIGH, niemals beide gleichzeitig!
+
+**IR-Sensor-Konfiguration:**
+- IR-LEDs werden über P12 ein/ausgeschaltet
+- Differenzmessung (LED on - LED off) eliminiert Fremdlicht
+- ADC mit 4x Gain für maximale Empfindlichkeit
 
 **Hinweis**: Reverse-Engineering durchgeführt mittels GPIO-Scan.
 
@@ -441,28 +456,53 @@ K_MSGQ_DEFINE(my_msgq, sizeof(int), 10, 4);
 # Threading
 CONFIG_MULTITHREADING=y
 CONFIG_NUM_PREEMPT_PRIORITIES=16
+CONFIG_MAIN_STACK_SIZE=3072
 
-# Bluetooth
-CONFIG_BT=y
-CONFIG_BT_PERIPHERAL=y
+# GPIO & I2C
+CONFIG_GPIO=y
+CONFIG_I2C=y
+CONFIG_SENSOR=y
 
 # Display
 CONFIG_DISPLAY=y
 CONFIG_MICROBIT_DISPLAY=y
 
-# I2C Sensoren
-CONFIG_I2C=y
-CONFIG_SENSOR=y
+# Bluetooth (Dual-Role: Central + Peripheral)
+CONFIG_BT=y
+CONFIG_BT_PERIPHERAL=y
+CONFIG_BT_CENTRAL=y
+CONFIG_BT_GATT_CLIENT=y
+CONFIG_BT_MAX_CONN=2
+CONFIG_BT_MAX_PAIRED=2
+CONFIG_BT_SMP=y
+CONFIG_BT_BONDABLE=y
+CONFIG_BT_SETTINGS=y
+CONFIG_BT_ZEPHYR_NUS=y
 
-# USB Console
-CONFIG_USB_DEVICE_STACK=y
-CONFIG_USB_CDC_ACM=y
+# Persistent Storage für Bonding
+CONFIG_SETTINGS=y
+CONFIG_NVS=y
+CONFIG_FLASH=y
+CONFIG_FLASH_MAP=y
+CONFIG_FLASH_PAGE_LAYOUT=y
+
+# PWM für Motoren und Speaker
+CONFIG_PWM=y
+
+# ADC für IR Sensoren
+CONFIG_ADC=y
+
+# FPU für Quaternion-Berechnungen
+CONFIG_FPU=y
+CONFIG_CBPRINTF_FP_SUPPORT=y
+
+# Console
+CONFIG_PRINTK=y
 CONFIG_CONSOLE=y
 CONFIG_UART_CONSOLE=y
 
-# Debug
-CONFIG_DEBUG=y
-CONFIG_DEBUG_THREAD_INFO=y
+# Heap (für BLE)
+CONFIG_HEAP_MEM_POOL_SIZE=8192
 ```
 
 ---
@@ -756,22 +796,58 @@ Falls Bootloader beschädigt:
 
 ```
 ProxiMicro/
-├── CLAUDE.md                           # Diese Datei
+├── CLAUDE.md                           # Diese Datei (Developer Reference)
+├── README.md                           # Projekt-Übersicht & Quick Start
+├── controller_mapping.py               # Xbox Controller Mapping Reference
+├── serial_monitor.py                   # Serial Port Monitor Tool
+│
+├── tools/
+│   └── telemetry_receiver.py           # BLE Telemetry Empfänger (bleak)
+│
 ├── imu_orientation/                    # IMU Orientierungs-Firmware
-│   └── firmware/
-│       ├── src/                        # Quellcode
-│       │   ├── main.c                  # Hauptprogramm
-│       │   ├── sensors.c               # LSM303AGR Treiber
-│       │   ├── orientation.c           # Orientierungsberechnung
-│       │   ├── mahony_filter.c         # Mahony AHRS Filter
-│       │   ├── hid_parser.c            # Xbox Controller HID Parser
-│       │   ├── ble_central.c           # BLE Central (Controller)
-│       │   ├── serial_output.c         # USB Serial Output
-│       │   ├── ble_output.c            # BLE NUS Output
-│       │   └── smp_bt.c                # BLE SMP Transport
-│       ├── prj.conf                    # Zephyr Konfiguration
-│       ├── CMakeLists.txt              # Build-Konfiguration
-│       └── build_flash.sh              # Build & Flash Script
+│   ├── firmware/
+│   │   ├── src/                        # Quellcode (18 .c + 17 .h)
+│   │   │   ├── main.c                  # Hauptprogramm, State Machine, Display
+│   │   │   ├── robot_state.c/h         # Globaler Roboter-Zustand
+│   │   │   ├── sensors.c/h             # LSM303AGR IMU Treiber
+│   │   │   ├── orientation.c/h         # Roll/Pitch/Heading Berechnung
+│   │   │   ├── mahony_filter.c/h       # Mahony AHRS Filter (Quaternion)
+│   │   │   ├── ble_central.c/h         # BLE Central (Xbox Controller)
+│   │   │   ├── hid_parser.c/h          # Xbox/PS5 HID Report Parser
+│   │   │   ├── motor_driver.c/h        # PWM H-Brücke Steuerung
+│   │   │   ├── autonomous_nav.c/h      # Autonome Navigation
+│   │   │   ├── yaw_controller.c/h      # PID Yaw Rate Regelung
+│   │   │   ├── ir_sensors.c/h          # IR Hindernissensoren (ADC+Kalman)
+│   │   │   ├── audio.c/h               # PWM Tongenerierung
+│   │   │   ├── telemetry.c/h           # Binary Telemetrie (~20Hz)
+│   │   │   ├── ble_output.c/h          # Nordic UART Service (NUS)
+│   │   │   ├── smp_bt.c/h              # BLE Stack Initialisierung
+│   │   │   ├── serial_output.c/h       # USB Serial Debug Output
+│   │   │   ├── motor_test.c/h          # GPIO Test Modus
+│   │   │   └── sysid.c/h               # System Identification Test
+│   │   │
+│   │   ├── boards/
+│   │   │   └── bbc_microbit_v2.overlay # Device Tree (PWM Pins)
+│   │   │
+│   │   ├── sysbuild/
+│   │   │   └── mcuboot.conf            # MCUboot Bootloader Konfig
+│   │   │
+│   │   ├── tools/
+│   │   │   ├── imu_plot.py             # Echtzeit IMU Plotting
+│   │   │   └── ir_plot.py              # IR Sensor Plotting
+│   │   │
+│   │   ├── prj.conf                    # Zephyr Haupt-Konfiguration
+│   │   ├── bt.conf                     # Alternative BLE Konfiguration
+│   │   ├── sysbuild.conf               # MCUboot Sysbuild Konfig
+│   │   ├── CMakeLists.txt              # Build-Konfiguration
+│   │   └── build_flash.sh              # Build & Flash Script
+│   │
+│   └── visualizer/                     # 3D Orientierungs-Visualisierer
+│       ├── visualizer.py               # Hauptprogramm (PyGame/OpenGL)
+│       ├── cube_renderer.py            # PyOpenGL Cube Renderer
+│       ├── serial_reader.py            # Serial Data Reader
+│       └── requirements.txt            # Python Dependencies
+│
 └── docs/
     ├── hardware/
     │   ├── microbit-v2-hardware.md     # Detaillierte Hardware-Docs
@@ -795,12 +871,30 @@ ProxiMicro/
 ### Übersicht
 
 Die aktuelle Firmware (`imu_orientation/firmware/`) implementiert:
+
+**Sensorik:**
 - **Echtzeit-Orientierung** mit LSM303AGR (Accelerometer + Magnetometer)
-- **Mahony AHRS Filter** für stabile Roll/Pitch/Heading Berechnung
-- **BLE Streaming** via Nordic UART Service (NUS)
-- **Xbox Wireless Controller** Unterstützung via BLE HID
+- **Mahony AHRS Filter** (Quaternion) für Roll/Pitch aus Accel+Mag
+- **2D Kalman-Filter** für Heading + Yaw Rate (θ, ω) mit Motor-Feedforward
+- **1D Kalman-Filter** für IR-Distanzschätzung (mm)
+- **Magnetometer-Kalibrierung** (Hard-Iron Kompensation, Flash-persistent)
+
+**Kommunikation:**
+- **BLE Dual-Role**: Central (Xbox Controller) + Peripheral (NUS Debug)
+- **Binary Telemetrie** ~20Hz über BLE NUS (36-Byte Pakete)
+- **USB Serial Debug** Output (115200 Baud)
 - **BLE Auto-Reconnect** mit persistentem Bonding (überlebt Neustart)
-- **Pulsierende Herz-Animation** auf dem 5x5 LED Display im Idle-Zustand
+
+**Steuerung:**
+- **Xbox Wireless Controller** via BLE HID
+- **PS5 Controller** Unterstützung (experimentell)
+- **Autonome Navigation** mit Heading-Hold und Hindernisvermeidung
+- **PID Yaw Rate Control** für präzise Drehungen
+
+**Aktuatoren:**
+- **PWM Motor-Steuerung** für Hexapod (Gehen + Drehen)
+- **PWM Audio** Tongenerierung mit Sound-Effekten
+- **5x5 LED Display** Animationen (Herz, Augen, Pfeil, Emoji)
 
 ### Xbox Controller Integration
 
@@ -869,13 +963,17 @@ Der Roboter kann autonom navigieren mit Heading-Hold und IR-basierter Hindernisv
 - D-Pad deaktiviert **niemals** den Autonomous Mode
 - Nur **Stick/Trigger >10%** = Manual Override = Autonomous Mode beendet
 
-**Zustände:**
+**Zustände (enum autonav_state):**
 
-| Zustand | Beschreibung |
-|---------|--------------|
-| `HEADING_HOLD` | Fährt vorwärts, hält Ziel-Heading, vermeidet Hindernisse |
-| `TURNING` | Dreht auf neues Ziel-Heading (proportionale Geschwindigkeit) |
-| `BACKING_UP` | Fährt rückwärts (beide IR < 150mm), dann Wegdrehen |
+| Zustand | Wert | Beschreibung |
+|---------|------|--------------|
+| `AUTONAV_DISABLED` | 0 | Navigation deaktiviert, manuelle Steuerung |
+| `AUTONAV_YAW_TEST_CW` | 1 | Yaw-Test: Rotation im Uhrzeigersinn (5s) |
+| `AUTONAV_YAW_TEST_CCW` | 2 | Yaw-Test: Rotation gegen Uhrzeigersinn (5s) |
+| `AUTONAV_YAW_TEST_DONE` | 3 | Yaw-Test: Abgeschlossen, zeigt Ergebnisse |
+| `AUTONAV_HEADING_HOLD` | 4 | Fährt vorwärts, hält Ziel-Heading, vermeidet Hindernisse |
+| `AUTONAV_TURNING` | 5 | Dreht auf neues Ziel-Heading (proportionale Geschwindigkeit) |
+| `AUTONAV_BACKING_UP` | 6 | Fährt rückwärts (beide IR < 150mm), dann Wegdrehen |
 
 **Hindernisvermeidung (Kalman-gefiltert):**
 - **> 350mm**: Volle Geschwindigkeit (100%), nur Heading-Korrektur
@@ -954,9 +1052,74 @@ struct telemetry_packet {
 };
 ```
 
-**Python struct format:** `'<BBIhhhhhHHbbBBHhhhhhh'`
+**Python struct format:** `'<BBIhhHhHHbbBBHhhhhhh'` (36 Bytes)
 
-**Test-Script:** `tools/telemetry_receiver.py`
+| Offset | Format | Feld | Quelle |
+|--------|--------|------|--------|
+| 0 | B | magic | 0xAB Sync-Byte |
+| 1 | B | version | 0x01 Protokoll |
+| 2 | I | timestamp_ms | Uptime (k_uptime_get_32) |
+| 6 | h | roll_x10 | Mahony Filter (Quaternion → Euler) |
+| 8 | h | pitch_x10 | Mahony Filter (Quaternion → Euler) |
+| 10 | H | heading_x10 | **2D Kalman Filter** (θ-Schätzung) |
+| 12 | h | yaw_rate_x10 | **2D Kalman Filter** (ω-Schätzung) |
+| 14 | H | ir_left_mm | **1D Kalman Filter** (Distanz) |
+| 16 | H | ir_right_mm | **1D Kalman Filter** (Distanz) |
+| 18 | b | motor_linear | Motor Command (-100 bis +100) |
+| 19 | b | motor_angular | Motor Command (-100 bis +100) |
+| 20 | B | nav_state | enum autonav_state (0-6) |
+| 21 | B | flags | Bit 0: autonav, Bit 1: motors |
+| 22 | H | target_heading_x10 | Autonomous Nav Target |
+| 24 | hhh | raw_ax/ay/az | **Roh** Accel (milli-g, User coords) |
+| 30 | hhh | raw_mx/my/mz | **Roh** Mag (milli-Gauss, User coords) |
+
+**Kalman-Filter Details:**
+- **Heading + Yaw Rate**: 2D Kalman mit Prozessmodell `θ' = θ + ω·dt`, `ω' = a·ω + b·motor_cmd`
+- **IR Distanz**: 1D Kalman für Glättung der ADC→mm Konvertierung
+
+**Test-Script:** `tools/telemetry_receiver.py` (benötigt `pip install bleak`)
+
+### Sensorfusion & Kalman-Filter
+
+**Orientierung (Roll/Pitch):**
+- Mahony AHRS Filter (Quaternion-basiert)
+- Fusioniert Accelerometer + Magnetometer
+- Output: Roll, Pitch in Grad
+
+**Heading + Yaw Rate (2D Kalman, `sensors.c`):**
+
+Der 2D Kalman-Filter schätzt Heading (θ) und Yaw Rate (ω) gemeinsam:
+
+```
+Zustandsvektor: x = [θ, ω]^T
+
+Prozessmodell:
+  θ' = θ + ω·dt
+  ω' = a·ω + b·motor_cmd    (a=0.95, b=0.4)
+
+Messmodell:
+  z = θ_magnetometer        (nur Heading wird gemessen)
+```
+
+**Parameter:**
+- `Q_THETA = 0.1` (Prozessrauschen Heading)
+- `Q_OMEGA = 1.0` (Prozessrauschen Yaw Rate)
+- `R_THETA = 2.0` (Messrauschen Magnetometer)
+- `DT = 0.1s` (10 Hz Update Rate)
+
+**IR-Distanz (1D Kalman, `ir_sensors.c`):**
+
+Einfacher 1D Kalman für Glättung der ADC→mm Konvertierung:
+
+```
+x' = x                      (konstantes Modell)
+z = distance_mm             (gemessene Distanz)
+```
+
+**Parameter:**
+- `Q = 1.0` (Prozessrauschen)
+- `R = 10.0` (Messrauschen)
+- Initial: P = 100.0, x = 550mm
 
 ### Magnetometer-Kalibrierung
 
@@ -989,6 +1152,198 @@ MAG CAL: Saved to flash
 # Antwort: CAL:OK (Kalibrierung gestartet) oder CAL:BUSY (läuft bereits)
 ```
 
+### IR-Sensoren
+
+Die Proxi-Platine hat zwei IR-Reflexionssensoren für Hindernisvermeidung.
+
+**Pin-Belegung:**
+
+| Funktion | micro:bit Pin | nRF52833 | ADC |
+|----------|---------------|----------|-----|
+| IR Links | P0 | P0.02 | AIN0 |
+| IR Rechts | P1 | P0.03 | AIN1 |
+| IR LED Enable | P12 | P0.12 | GPIO (Active-HIGH) |
+
+**Messprinzip:**
+1. ADC-Messung mit IR-LEDs **aus** (Ambient-Licht)
+2. IR-LEDs einschalten (P12=HIGH)
+3. ADC-Messung mit IR-LEDs **an** (Reflection)
+4. Differenz = tatsächlicher IR-Wert (eliminiert Fremdlicht)
+
+**Signalverarbeitung:**
+1. Differenzmessung (IR on - IR off) → Roher ADC-Wert
+2. Tiefpass-Filter (Alpha=0.3) für Rauschunterdrückung
+3. Bias-Kompensation für Ambient-Licht
+4. ADC → mm Konvertierung (Lookup-Tabelle)
+5. **1D Kalman-Filter** für finale Distanzschätzung (Q=1.0, R=10.0)
+
+**Distanz-Mapping (kalibriert):**
+
+| ADC-Wert | Distanz |
+|----------|---------|
+| 0-50 | > 400mm (kein Hindernis) |
+| 50-200 | 400mm - 150mm |
+| 200-400 | 150mm - 50mm |
+| > 400 | < 50mm (sehr nah) |
+
+**API (ir_sensors.h):**
+```c
+void ir_sensors_get_distance(float *left_mm, float *right_mm);
+void ir_sensors_get_raw(uint16_t *left, uint16_t *right);
+void ir_sensors_set_debug(bool enabled);
+```
+
+### Audio-Modul
+
+PWM-basierte Tongenerierung auf dem integrierten Lautsprecher (P0.00).
+
+**Sound Events (enum sound_event):**
+
+| Event | Beschreibung |
+|-------|--------------|
+| `SOUND_PAIRING_START` | Aufsteigender Ton (Scan startet) |
+| `SOUND_CONNECTED` | Erfolgsmelodie (Controller verbunden) |
+| `SOUND_DISCONNECTED` | Absteigender Ton (Verbindung verloren) |
+| `SOUND_OBSTACLE` | Warnton (Hindernis) |
+| `SOUND_BUTTON_PRESS` | Kurzer Klick |
+| `SOUND_ERROR` | Fehlerton |
+| `SOUND_SHOOT` | Laser/Schuss-Effekt (Button A) |
+| `SOUND_MACHINEGUN` | Maschinengewehr (Button B gehalten) |
+| `SOUND_CALIBRATION_BEEP` | Kurzer Beep während Kalibrierung |
+| `SOUND_CALIBRATION_DONE` | Erfolgs-Jingle nach Kalibrierung |
+
+**Proximity Beeper:**
+- Parksensor-ähnliche Funktion
+- Beep-Rate proportional zur Nähe
+- Aktiviert sich automatisch bei IR < 300mm
+
+**Noten-Frequenzen (Hz):**
+```c
+#define NOTE_C4  262
+#define NOTE_D4  294
+#define NOTE_E4  330
+...
+#define NOTE_C5  523
+```
+
+### Motor-Treiber
+
+PWM-basierte H-Brücken-Steuerung für den Hexapod.
+
+**PWM-Zuordnung:**
+
+| PWM | Funktion | Pins |
+|-----|----------|------|
+| PWM1 | Speaker | P0.00 |
+| PWM2 | Geh-Motor | P13 (fwd), P14 (bwd) |
+| PWM3 | Dreh-Motor | P15 (links), P16 (rechts) |
+
+**API (motor_driver.h):**
+```c
+void motor_set_velocity(int16_t linear, int16_t angular);
+void motor_emergency_stop(void);
+void motor_enable(bool enable);
+void motor_get_current_cmd(int8_t *linear, int8_t *angular);
+```
+
+**Differential Drive:**
+- `linear`: -100 (rückwärts) bis +100 (vorwärts)
+- `angular`: -100 (links drehen) bis +100 (rechts drehen)
+
+### Yaw Rate Controller
+
+PID-basierte Regelung der Drehgeschwindigkeit mit Magnetometer-Feedback.
+
+**Parameter:**
+
+| Parameter | Wert | Beschreibung |
+|-----------|------|--------------|
+| `YAW_RATE_MAX` | 40°/s | Maximale Drehrate |
+| `YAW_KP` | 1.0 | Proportional-Gain |
+| `YAW_KI` | 0.3 | Integral-Gain |
+| `YAW_KD` | 0.8 | Derivative-Gain |
+
+**Trigger-Mapping:**
+- LT (Left Trigger): Drehung nach links (negative Rate)
+- RT (Right Trigger): Drehung nach rechts (positive Rate)
+- Beide bei 0: Keine Drehung (Feedforward übernimmt)
+
+### Xbox Controller Mapping (Detailliert)
+
+**Button Masks (robot_state.h):**
+```c
+#define XBOX_BTN_A          0x0001
+#define XBOX_BTN_B          0x0002
+#define XBOX_BTN_X          0x0004
+#define XBOX_BTN_Y          0x0008
+#define XBOX_BTN_LB         0x0010
+#define XBOX_BTN_RB         0x0020
+#define XBOX_BTN_VIEW       0x0040
+#define XBOX_BTN_MENU       0x0080
+#define XBOX_BTN_LSTICK     0x0100
+#define XBOX_BTN_RSTICK     0x0200
+#define XBOX_BTN_XBOX       0x0400
+```
+
+**D-Pad Werte (Hat Switch):**
+
+| Wert | Richtung |
+|------|----------|
+| 0 | Neutral |
+| 1 | Up |
+| 2 | Up-Right |
+| 3 | Right |
+| 4 | Down-Right |
+| 5 | Down |
+| 6 | Down-Left |
+| 7 | Left |
+| 8 | Up-Left |
+
+**Steuerung:**
+
+| Input | Aktion |
+|-------|--------|
+| Left Stick Y | Vorwärts/Rückwärts |
+| Left Stick X | Links/Rechts drehen |
+| Right Trigger | Yaw Rate Control (CW) |
+| Left Trigger | Yaw Rate Control (CCW) |
+| D-Pad UP | Autonomous Mode aktivieren |
+| D-Pad DOWN | 180° U-Turn |
+| D-Pad LEFT | +90° drehen (CCW) |
+| D-Pad RIGHT | -90° drehen (CW) |
+| Button A | Sound: Shoot + Emoji |
+| Button B | Sound: Machine Gun + Emoji |
+| Button X | Emoji: Surprised |
+| Button Y | Emoji: Frown |
+| **LB + RB** | **Emergency Stop!** |
+| **L3 + R3** | **Emergency Stop!** |
+
+**Deadzone:** 10% (~3277 von 32767)
+
+**Manual Override:**
+- Stick > 10% ODER Trigger > 10% → Autonomous Mode deaktivieren
+- D-Pad-Eingaben deaktivieren Autonomous Mode **nicht**
+
+### micro:bit Button Handling
+
+| Button | Kurzdruck | Langdruck |
+|--------|-----------|-----------|
+| **Button A** | - | **1s**: BLE Pairing starten/stoppen |
+| **Button B** | GPIO-Test weiterschalten | **3s**: Magnetometer-Kalibrierung |
+
+**Display-Animationen:**
+
+| Zustand | Animation |
+|---------|-----------|
+| Idle | Pulsierendes Herz |
+| Pairing/Scanning | Rotierender Punkt |
+| Connected | Blinkende Augen |
+| Autonomous | Pfeil nach vorne |
+| Button A/B/X/Y | Emoji (2s) |
+| Kalibrierung | Drehender Punkt |
+| Erfolg | Häkchen |
+| Fehler | X |
+
 ### Build & Flash
 
 ```bash
@@ -1007,6 +1362,73 @@ pyocd flash -t nrf52833 build/firmware/zephyr/zephyr.hex
 ### Aktuelle Konfiguration
 
 MCUboot ist derzeit **deaktiviert** für einfaches direktes Flashen. Für OTA-Updates muss MCUboot in `prj.conf` wieder aktiviert werden.
+
+### Thread-Architektur
+
+Die Firmware verwendet mehrere Zephyr-Threads für Echtzeit-Verarbeitung:
+
+| Thread | Priorität | Stack | Funktion |
+|--------|-----------|-------|----------|
+| Main | Default | 3072B | State Machine, Buttons, Display |
+| Motor | 2 | 768B | PWM Motor Control (50Hz) |
+| BLE Central | 3 | 2048B | Xbox Controller Scan/Connect |
+| Sensor | 5 | 1024B | IMU Reading + Orientation (50Hz) |
+| Audio | 6 | 512B | Tone Generation |
+| IR Sensors | - | - | ADC Obstacle Reading |
+| Autonomous Nav | - | - | Heading Control + Avoidance |
+| Telemetry | - | - | Binary Packet Streaming (20Hz) |
+| Serial Output | - | - | USB Debug Output |
+
+**Message Queues:**
+
+| Queue | Von → Nach | Inhalt |
+|-------|------------|--------|
+| `motor_cmd_q` | Controller → Motor | linear, angular, emergency_stop |
+| `display_state_q` | Any → Display | enum display_state |
+| `obstacle_q` | IR Sensors → Nav | left/right detection |
+| `sound_q` | Any → Audio | enum sound_event |
+
+---
+
+## Tools & Utilities
+
+### Python Tools
+
+**Installation:**
+```bash
+pip install pyserial bleak pygame PyOpenGL numpy
+```
+
+**1. Telemetry Receiver** (`tools/telemetry_receiver.py`)
+```bash
+# BLE Telemetrie-Pakete empfangen und parsen
+python tools/telemetry_receiver.py
+```
+
+**2. Serial Monitor** (`serial_monitor.py`)
+```bash
+# USB Serial Output anzeigen
+python serial_monitor.py
+```
+
+**3. IMU Plot** (`imu_orientation/firmware/tools/imu_plot.py`)
+```bash
+# Echtzeit Roll/Pitch/Heading Plot
+python imu_orientation/firmware/tools/imu_plot.py
+```
+
+**4. IR Plot** (`imu_orientation/firmware/tools/ir_plot.py`)
+```bash
+# IR Sensor Werte plotten
+python imu_orientation/firmware/tools/ir_plot.py
+```
+
+**5. 3D Visualizer** (`imu_orientation/visualizer/`)
+```bash
+cd imu_orientation/visualizer
+pip install -r requirements.txt
+python visualizer.py
+```
 
 ---
 
