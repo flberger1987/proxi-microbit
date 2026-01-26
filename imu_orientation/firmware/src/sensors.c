@@ -199,6 +199,10 @@ static struct mag_calibration mag_cal = {
     .offset_x = 0.0f,
     .offset_y = 0.0f,
     .offset_z = 0.0f,
+    .scale_x = 1.0f,
+    .scale_y = 1.0f,
+    .scale_z = 1.0f,
+    .version = MAG_CAL_VERSION,
     .valid = false
 };
 
@@ -213,19 +217,34 @@ static int mag_cal_settings_set(const char *name, size_t len,
     int rc;
 
     if (settings_name_steq(name, "data", &next) && !next) {
-        if (len != sizeof(mag_cal)) {
-            return -EINVAL;
+        /* Read calibration data */
+        struct mag_calibration loaded_cal;
+        rc = read_cb(cb_arg, &loaded_cal, len);
+        if (rc < 0) {
+            return rc;
         }
-        rc = read_cb(cb_arg, &mag_cal, sizeof(mag_cal));
-        if (rc >= 0) {
-            printk("MAG CAL: Loaded from flash (%.3f, %.3f, %.3f) valid=%d\n",
-                   (double)mag_cal.offset_x,
-                   (double)mag_cal.offset_y,
-                   (double)mag_cal.offset_z,
-                   mag_cal.valid);
+
+        /* Check version compatibility */
+        if (loaded_cal.version != MAG_CAL_VERSION) {
+            printk("MAG CAL: Old version %d in flash, expected %d - recalibration needed\n",
+                   loaded_cal.version, MAG_CAL_VERSION);
+            /* Keep default calibration (identity) */
             return 0;
         }
-        return rc;
+
+        /* Copy loaded calibration */
+        mag_cal = loaded_cal;
+
+        printk("MAG CAL: Loaded v%d from flash\n", mag_cal.version);
+        printk("  Hard-Iron: (%.3f, %.3f, %.3f)\n",
+               (double)mag_cal.offset_x,
+               (double)mag_cal.offset_y,
+               (double)mag_cal.offset_z);
+        printk("  Soft-Iron: (%.3f, %.3f, %.3f)\n",
+               (double)mag_cal.scale_x,
+               (double)mag_cal.scale_y,
+               (double)mag_cal.scale_z);
+        return 0;
     }
     return -ENOENT;
 }
@@ -353,6 +372,7 @@ const struct mag_calibration *sensors_get_calibration(void)
 
 static void update_calibration(float mx, float my, float mz)
 {
+    /* Track min/max for each axis */
     if (mx < cal_min_x) cal_min_x = mx;
     if (mx > cal_max_x) cal_max_x = mx;
     if (my < cal_min_y) cal_min_y = my;
@@ -363,18 +383,55 @@ static void update_calibration(float mx, float my, float mz)
     cal_samples++;
 
     if (cal_samples >= CALIBRATION_SAMPLES) {
-        /* Calculate hard-iron offsets: offset = (max + min) / 2 */
+        /*
+         * Hard-Iron Compensation:
+         * The center of the ellipsoid is the offset caused by permanent magnets.
+         * offset = (max + min) / 2
+         */
         mag_cal.offset_x = (cal_max_x + cal_min_x) / 2.0f;
         mag_cal.offset_y = (cal_max_y + cal_min_y) / 2.0f;
         mag_cal.offset_z = (cal_max_z + cal_min_z) / 2.0f;
+
+        /*
+         * Soft-Iron Compensation:
+         * The ellipsoid has different radii on each axis. We scale each axis
+         * so that all radii become equal, transforming ellipsoid → sphere.
+         *
+         * radius = (max - min) / 2 = range / 2
+         * avg_radius = (radius_x + radius_y + radius_z) / 3
+         * scale = avg_radius / radius (normalize each axis to avg)
+         */
+        float range_x = cal_max_x - cal_min_x;
+        float range_y = cal_max_y - cal_min_y;
+        float range_z = cal_max_z - cal_min_z;
+
+        /* Protect against division by zero (bad calibration data) */
+        if (range_x < 1.0f) range_x = 1.0f;
+        if (range_y < 1.0f) range_y = 1.0f;
+        if (range_z < 1.0f) range_z = 1.0f;
+
+        float avg_range = (range_x + range_y + range_z) / 3.0f;
+
+        mag_cal.scale_x = avg_range / range_x;
+        mag_cal.scale_y = avg_range / range_y;
+        mag_cal.scale_z = avg_range / range_z;
+
+        mag_cal.version = MAG_CAL_VERSION;
         mag_cal.valid = true;
 
         calibrating = false;
 
-        printk("CAL,DONE,%.3f,%.3f,%.3f\n",
+        printk("CAL,DONE\n");
+        printk("  Hard-Iron (offset): %.3f, %.3f, %.3f\n",
                (double)mag_cal.offset_x,
                (double)mag_cal.offset_y,
                (double)mag_cal.offset_z);
+        printk("  Soft-Iron (scale):  %.3f, %.3f, %.3f\n",
+               (double)mag_cal.scale_x,
+               (double)mag_cal.scale_y,
+               (double)mag_cal.scale_z);
+        printk("  Ranges: X=%.1f, Y=%.1f, Z=%.1f (avg=%.1f)\n",
+               (double)range_x, (double)range_y, (double)range_z, (double)avg_range);
 
         /* Save calibration to flash for persistence across reboots */
         int err = settings_save_one("mag_cal/data", &mag_cal, sizeof(mag_cal));
@@ -496,12 +553,21 @@ static void sensor_thread_fn(void *p1, void *p2, void *p3)
             update_calibration(mx, my, mz);
         }
 
-        /* Apply hard-iron calibration to magnetometer */
+        /* Apply magnetometer calibration:
+         * 1. Hard-Iron: Subtract offset (center the ellipsoid)
+         * 2. Soft-Iron: Scale to transform ellipsoid → sphere
+         */
         float mx_cal = mx, my_cal = my, mz_cal = mz;
         if (mag_cal.valid) {
+            /* Hard-Iron: center the measurements */
             mx_cal = mx - mag_cal.offset_x;
             my_cal = my - mag_cal.offset_y;
             mz_cal = mz - mag_cal.offset_z;
+
+            /* Soft-Iron: normalize axis ranges */
+            mx_cal *= mag_cal.scale_x;
+            my_cal *= mag_cal.scale_y;
+            mz_cal *= mag_cal.scale_z;
         }
 
         /* Calculate orientation directly (tilt-compensated compass)

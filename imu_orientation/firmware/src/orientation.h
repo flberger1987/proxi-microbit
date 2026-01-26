@@ -17,13 +17,35 @@ struct orientation_data {
     uint32_t timestamp_ms;
 };
 
-/* Magnetometer calibration offsets (hard-iron compensation) */
+/**
+ * Magnetometer calibration data
+ *
+ * Hard-Iron: Constant offsets caused by permanent magnets nearby
+ *   m_centered = m_raw - offset
+ *
+ * Soft-Iron: Scale factors to transform ellipsoid to sphere
+ *   m_calibrated = scale * m_centered
+ *
+ * Full calibration: m_cal = scale * (m_raw - offset)
+ */
 struct mag_calibration {
+    /* Hard-Iron offsets (ellipsoid center) */
     float offset_x;
     float offset_y;
     float offset_z;
+
+    /* Soft-Iron scale factors (ellipsoid → sphere) */
+    float scale_x;
+    float scale_y;
+    float scale_z;
+
+    /* Calibration version for flash compatibility */
+    uint8_t version;
     bool valid;
 };
+
+/* Current calibration version - increment when struct changes */
+#define MAG_CAL_VERSION 2
 
 /**
  * Calculate roll and pitch from accelerometer data

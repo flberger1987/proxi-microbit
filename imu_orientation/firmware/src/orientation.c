@@ -44,11 +44,20 @@ float orientation_calc_heading(float mx, float my, float mz,
     float xh, yh;
     float heading;
 
-    /* Apply hard-iron calibration */
+    /* Apply magnetometer calibration:
+     * 1. Hard-Iron: Subtract offset (center the ellipsoid)
+     * 2. Soft-Iron: Scale to transform ellipsoid → sphere
+     */
     if (cal != NULL && cal->valid) {
+        /* Hard-Iron compensation */
         mx_cal = mx - cal->offset_x;
         my_cal = my - cal->offset_y;
         mz_cal = mz - cal->offset_z;
+
+        /* Soft-Iron compensation */
+        mx_cal *= cal->scale_x;
+        my_cal *= cal->scale_y;
+        mz_cal *= cal->scale_z;
     } else {
         mx_cal = mx;
         my_cal = my;

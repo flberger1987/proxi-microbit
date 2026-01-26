@@ -1123,27 +1123,66 @@ z = distance_mm             (gemessene Distanz)
 
 ### Magnetometer-Kalibrierung
 
-Die Magnetometer-Kalibrierung kompensiert Hard-Iron-Störungen (Offset) durch Metall/Magnete in der Nähe des Sensors.
+Die Magnetometer-Kalibrierung kompensiert zwei Arten von Störungen:
+
+**1. Hard-Iron (Offset):**
+- Verursacht durch permanente Magnete in der Nähe
+- Verschiebt den Mittelpunkt der Messungen
+- Kompensation: `m_centered = m_raw - offset`
+
+**2. Soft-Iron (Skalierung):**
+- Verursacht durch ferromagnetische Materialien (Eisen, Nickel)
+- Verzerrt die Kugel zu einem Ellipsoid
+- Kompensation: `m_calibrated = scale * m_centered`
+
+**Kalibrierungs-Algorithmus:**
+```
+1. Sammle 300 Samples (30s bei 10Hz)
+2. Berechne Min/Max für jede Achse
+
+Hard-Iron:
+   offset = (max + min) / 2
+
+Soft-Iron (Ellipsoid → Sphäre):
+   range_x = max_x - min_x
+   range_y = max_y - min_y
+   range_z = max_z - min_z
+   avg_range = (range_x + range_y + range_z) / 3
+   scale_x = avg_range / range_x
+   scale_y = avg_range / range_y
+   scale_z = avg_range / range_z
+```
+
+**Kalibrierungs-Struktur (orientation.h):**
+```c
+struct mag_calibration {
+    float offset_x, offset_y, offset_z;  /* Hard-Iron */
+    float scale_x, scale_y, scale_z;     /* Soft-Iron */
+    uint8_t version;                      /* Flash-Kompatibilität */
+    bool valid;
+};
+```
 
 **Kalibrierung starten:**
 1. **Long-press Button B** (3 Sekunden gedrückt halten)
-2. **30 Sekunden** lang den micro:bit durch alle Orientierungen drehen
-3. Dabei alle Achsen abdecken (wie eine Kugel abrollen)
+2. **30 Sekunden** lang den micro:bit durch **alle Orientierungen** drehen
+3. Dabei alle Achsen abdecken (wie eine Kugel abrollen - wichtig für Soft-Iron!)
 4. Kalibrierung wird automatisch im Flash gespeichert
 
-**Serielle Ausgabe während Kalibrierung:**
+**Serielle Ausgabe nach Kalibrierung:**
 ```
-CAL,START
-CAL,<sample>,<mx>,<my>,<mz>
-...
-CAL,DONE,<offset_x>,<offset_y>,<offset_z>
-MAG CAL: Saved to flash
+CAL,DONE
+  Hard-Iron (offset): 123.4, -56.7, 89.0
+  Soft-Iron (scale):  1.05, 0.98, 0.97
+  Ranges: X=456.0, Y=478.0, Z=489.0 (avg=474.3)
+CAL: Saved to flash
 ```
 
 **Wichtig:**
 - Kalibrierung wird im Flash persistent gespeichert (überlebt Neustart)
 - **Beim Flashen mit `pyocd erase --chip` geht die Kalibrierung verloren!**
 - Normales Flashen mit `pyocd flash` behält die Kalibrierung (Settings-Partition bleibt)
+- Nach Firmware-Update mit neuer Kalibrierungs-Version: Neu kalibrieren erforderlich
 - Nach Verlust: Neu kalibrieren mit Long-press Button B
 
 **Kalibrierung via BLE:**
