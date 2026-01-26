@@ -99,7 +99,7 @@ static const int sg_coeff[SG_WINDOW_SIZE] = {-2, -1, 0, 1, 2};
 /* Noise parameters */
 #define Q_THETA      0.5f          /* Process noise for heading */
 #define Q_OMEGA      10.0f         /* Process noise for yaw rate (high = fast response) */
-#define R_THETA      0.5f          /* Measurement noise (very low = trust magnetometer) */
+#define R_THETA      3.0f          /* Measurement noise (higher = more smoothing, less mag trust) */
 
 /* State vector [θ, ω] */
 static float kalman_theta = 0.0f;  /* Heading estimate (degrees) */
@@ -271,7 +271,7 @@ static float cal_min_z, cal_max_z;
 static int cal_samples;
 
 /* Sensor thread */
-#define SENSOR_STACK_SIZE 2048
+#define SENSOR_STACK_SIZE 2560
 #define SENSOR_PRIORITY 5
 #define SENSOR_PERIOD_MS 100  /* 10 Hz - Kalman predicts between measurements */
 #define CALIBRATION_SAMPLES 300   /* 30 seconds at 10 Hz */

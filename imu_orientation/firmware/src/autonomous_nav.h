@@ -21,9 +21,9 @@
  */
 enum autonav_state {
     AUTONAV_DISABLED,           /* Navigation disabled, manual control */
-    AUTONAV_HEADING_HOLD,       /* Driving forward, holding target heading */
-    AUTONAV_TURNING,            /* Turning to new target heading */
-    AUTONAV_BACKING_UP,         /* Reversing (both sides blocked) */
+    AUTONAV_HEADING_HOLD,       /* Driving forward with continuous heading correction */
+    AUTONAV_TURNING,            /* Turning to new target heading (in place) */
+    AUTONAV_SCANNING,           /* Obstacle detected: scanning left/right for best path */
 };
 
 /* ============================================================================
@@ -35,23 +35,25 @@ enum autonav_state {
 #define AUTONAV_SPEED_ANGULAR    60   /* Turn speed */
 #define AUTONAV_SPEED_BACKUP    -50   /* Backup speed */
 
-/* Heading control parameters */
-#define HEADING_CORRECTION_THRESHOLD 10.0f /* Stop and turn if error > this (degrees) */
-#define HEADING_TOLERANCE            5.0f  /* Target reached when error < this (degrees) */
+/* Heading control - continuous correction while moving */
+#define HEADING_KP               1.0f  /* Proportional gain for heading correction */
+#define HEADING_TOLERANCE        2.0f  /* Target reached when error < this (degrees) */
+#define AUTONAV_YAW_RATE_MAX    20.0f  /* Maximum yaw rate for autonomous nav (°/s) */
 
 /* Turning control parameters (in-place rotation to target heading) */
-#define TURNING_KP               0.67f /* Proportional gain: 90° error → 60% speed */
-#define TURNING_MIN_SPEED        25    /* Minimum angular speed (~20°/s) */
+#define TURNING_KP               0.8f  /* Proportional gain: 90° error → 72% speed */
+#define TURNING_MIN_YAW_RATE    10.0f  /* Minimum yaw rate for turning (°/s) */
 
-/* Obstacle avoidance parameters (using Kalman-filtered mm distance) */
-#define OBSTACLE_DIST_CRITICAL   150.0f  /* Back up if closer than this (mm) */
-#define OBSTACLE_DIST_AVOID      350.0f  /* Start avoiding if closer than this (mm) */
-#define OBSTACLE_KP_AVOID        0.3f    /* Proportional gain for avoidance (angular/mm) */
-#define OBSTACLE_DIFF_DEADZONE   30.0f   /* Ignore small differences (mm) */
+/* Obstacle parameters */
+#define OBSTACLE_DIST_STOP       200.0f  /* Stop and scan if closer than this (mm) */
+#define OBSTACLE_DIST_SLOW       400.0f  /* Slow down if closer than this (mm) */
+
+/* Scanning parameters */
+#define SCAN_ANGLE               90.0f  /* How far to look left/right (degrees) */
 
 /* Timing (ms) */
-#define AUTONAV_BACKUP_DURATION  500   /* How long to back up */
-#define AUTONAV_TURNING_TIMEOUT  60000 /* Max time for turning (60 sec) */
+#define AUTONAV_TURNING_TIMEOUT  30000 /* Max time for turning (30 sec) */
+#define SCAN_SETTLE_TIME         300   /* Wait time after reaching scan position (ms) */
 
 /* ============================================================================
  * Public API

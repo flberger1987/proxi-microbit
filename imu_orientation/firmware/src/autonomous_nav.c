@@ -15,6 +15,7 @@
 #include "ir_sensors.h"
 #include "sensors.h"
 #include "audio.h"
+#include "yaw_controller.h"
 
 /* ============================================================================
  * Thread Configuration
@@ -43,6 +44,10 @@ static int64_t state_start_time;
 
 /* Heading-hold target (degrees, 0-360) */
 static float target_heading;
+
+/* Scanning state variables */
+static int scan_phase;            /* 0=scanning left (CCW), 1=scanning right (CW) */
+static float scan_origin_heading; /* Heading when scan started */
 
 /* ============================================================================
  * Helper Functions
@@ -106,19 +111,15 @@ static void set_motor_for_state(enum autonav_state state)
 
     switch (state) {
     case AUTONAV_HEADING_HOLD:
-        /* Forward motion - angular handled separately by process_heading_hold */
+        /* Forward motion - angular handled by process_heading_hold */
         cmd.linear = AUTONAV_SPEED_LINEAR;
         cmd.angular = 0;
         break;
 
     case AUTONAV_TURNING:
-        /* Turning in place - angular set by process_turning */
+    case AUTONAV_SCANNING:
+        /* Turning in place - angular set by process functions */
         cmd.linear = 0;
-        cmd.angular = 0;
-        break;
-
-    case AUTONAV_BACKING_UP:
-        cmd.linear = AUTONAV_SPEED_BACKUP;
         cmd.angular = 0;
         break;
 
@@ -170,113 +171,94 @@ static inline int16_t clamp_i16(int16_t val, int16_t min, int16_t max)
 }
 
 /**
- * Process heading-hold state - drive forward while maintaining target heading
+ * Process heading-hold state - drive forward with CONTINUOUS heading correction
  *
- * New strategy (stop-turn-go):
- * - Drive straight forward if heading error < 10°
- * - If heading error >= 10°: stop, turn to correct heading, then resume
- * - Obstacle avoidance still applies (may trigger BACKING_UP)
+ * Strategy:
+ * - Always move forward while continuously correcting heading
+ * - Outer loop: Heading error → desired yaw rate (°/s)
+ * - Inner loop: Yaw rate PID controller (in yaw_controller.c)
+ * - Slow down when obstacle detected
+ * - Stop and scan when obstacle is too close
  */
 static void process_heading_hold(void)
 {
     /* Get Kalman-filtered distances in mm */
     float left_mm, right_mm;
     ir_sensors_get_distance(&left_mm, &right_mm);
-
-    /* Find minimum distance (closest obstacle) */
     float min_dist = (left_mm < right_mm) ? left_mm : right_mm;
 
-    /* Critical: both sides too close → back up */
-    if (left_mm < OBSTACLE_DIST_CRITICAL && right_mm < OBSTACLE_DIST_CRITICAL) {
-        printk("AUTONAV: Critical! L=%.0f R=%.0f mm, backing up\n",
-               (double)left_mm, (double)right_mm);
-        transition_to(AUTONAV_BACKING_UP);
+    /* Obstacle too close: stop and scan for clear path */
+    if (min_dist < OBSTACLE_DIST_STOP) {
+        printk("AUTONAV: Obstacle at %.0f mm, starting scan\n", (double)min_dist);
+        scan_origin_heading = get_current_heading();
+        scan_phase = 0;  /* Start scanning left (CCW) */
+        yaw_controller_set_target(0.0f);
+        transition_to(AUTONAV_SCANNING);
         return;
     }
 
-    /* Check heading error */
+    /* Calculate heading error */
     float current = get_current_heading();
     float heading_error = heading_delta(target_heading, current);
 
-    /* Debug: Log heading every ~1 second */
-    static int debug_counter = 0;
-    if (++debug_counter >= 20) {  /* 20 * 50ms = 1s */
-        debug_counter = 0;
-        printk("HEADING: target=%.1f current=%.1f error=%+.1f\n",
-               (double)target_heading, (double)current, (double)heading_error);
+    /* Calculate desired yaw rate from heading error (outer loop)
+     * error > 0 means target is CCW from current → need CCW rotation
+     * Yaw controller convention: positive = CW, negative = CCW
+     * Therefore: negate the error!
+     */
+    float desired_yaw_rate = 0.0f;
+    if (abs_f(heading_error) > HEADING_TOLERANCE) {
+        /* Proportional: 1°/s per degree of error, clamped to max */
+        desired_yaw_rate = -heading_error * HEADING_KP;
+        if (desired_yaw_rate > AUTONAV_YAW_RATE_MAX) desired_yaw_rate = AUTONAV_YAW_RATE_MAX;
+        if (desired_yaw_rate < -AUTONAV_YAW_RATE_MAX) desired_yaw_rate = -AUTONAV_YAW_RATE_MAX;
     }
 
-    /* If heading error > threshold: stop and turn to correct */
-    if (abs_f(heading_error) > HEADING_CORRECTION_THRESHOLD) {
-        printk("AUTONAV: Heading drift %.1f° > %.1f°, stopping to correct\n",
-               (double)abs_f(heading_error), (double)HEADING_CORRECTION_THRESHOLD);
-        transition_to(AUTONAV_TURNING);
-        return;
+    /* Set target for inner yaw rate controller */
+    yaw_controller_set_target(desired_yaw_rate);
+
+    /* Calculate forward speed - slow down near obstacles */
+    float speed_factor = 1.0f;
+    if (min_dist < OBSTACLE_DIST_SLOW) {
+        /* Linear interpolation: full speed at SLOW dist, 30% at STOP dist */
+        speed_factor = 0.3f + 0.7f * (min_dist - OBSTACLE_DIST_STOP) /
+                       (OBSTACLE_DIST_SLOW - OBSTACLE_DIST_STOP);
+        if (speed_factor < 0.3f) speed_factor = 0.3f;
     }
-
-    /* Calculate obstacle avoidance correction (only angular, no heading correction) */
-    int16_t angular = 0;
-
-    if (min_dist < OBSTACLE_DIST_AVOID) {
-        /*
-         * Proportional avoidance based on distance difference:
-         * - diff > 0 → right has more space → turn right (positive angular)
-         * - diff < 0 → left has more space → turn left (negative angular)
-         */
-        float diff = right_mm - left_mm;
-
-        /* Apply deadzone for small differences */
-        if (abs_f(diff) > OBSTACLE_DIFF_DEADZONE) {
-            /* Scale avoidance by proximity (closer = stronger response) */
-            float proximity_factor = 1.0f - (min_dist / OBSTACLE_DIST_AVOID);
-            proximity_factor = (proximity_factor < 0.0f) ? 0.0f : proximity_factor;
-
-            float angular_avoid = diff * OBSTACLE_KP_AVOID * (1.0f + proximity_factor);
-            angular = clamp_i16((int16_t)angular_avoid,
-                                -AUTONAV_SPEED_ANGULAR, AUTONAV_SPEED_ANGULAR);
-
-            printk("AUTONAV: Avoid L=%.0f R=%.0f diff=%+.0f → angular=%+d\n",
-                   (double)left_mm, (double)right_mm, (double)diff, angular);
-        }
-    }
-
-    /* Drive forward (reduce speed when avoiding) */
-    float speed_factor = 1.0f - (abs_f((float)angular) / (float)AUTONAV_SPEED_ANGULAR) * 0.5f;
-    if (speed_factor < 0.3f) speed_factor = 0.3f;
     int16_t linear = (int16_t)(AUTONAV_SPEED_LINEAR * speed_factor);
 
+    /* Debug: Log every ~2 seconds */
+    static int debug_counter = 0;
+    if (++debug_counter >= 40) {
+        debug_counter = 0;
+        printk("NAV: hdg=%.0f tgt=%.0f err=%+.0f rate=%.1f dist=%.0f spd=%d\n",
+               (double)current, (double)target_heading, (double)heading_error,
+               (double)desired_yaw_rate, (double)min_dist, linear);
+    }
+
+    /* Send linear speed to motor queue (angular comes from yaw controller) */
     struct motor_cmd cmd = {
         .linear = linear,
-        .angular = angular,
+        .angular = 0,  /* Ignored - yaw controller provides angular */
     };
     k_msgq_put(&motor_cmd_q, &cmd, K_NO_WAIT);
 }
 
 /**
  * Process turning state - rotate in place to reach target heading
- * Uses proportional control with minimum speed for smooth approach
- * Also checks for obstacles and enforces timeout
+ * Outer loop: Heading error → desired yaw rate
+ * Inner loop: Yaw rate PID controller
  */
 static void process_turning(void)
 {
     int64_t elapsed = k_uptime_get() - state_start_time;
 
-    /* Check for timeout (60 seconds) */
+    /* Check for timeout */
     if (elapsed >= AUTONAV_TURNING_TIMEOUT) {
         printk("AUTONAV: Turning timeout! Resuming heading-hold\n");
-        target_heading = get_current_heading();  /* Accept current heading */
+        target_heading = get_current_heading();
+        yaw_controller_set_target(0.0f);
         transition_to(AUTONAV_HEADING_HOLD);
-        return;
-    }
-
-    /* Check for critical obstacles using Kalman-filtered IR */
-    float left_mm, right_mm;
-    ir_sensors_get_distance(&left_mm, &right_mm);
-
-    if (left_mm < OBSTACLE_DIST_CRITICAL && right_mm < OBSTACLE_DIST_CRITICAL) {
-        printk("AUTONAV: Critical obstacle while turning! L=%.0f R=%.0f mm\n",
-               (double)left_mm, (double)right_mm);
-        transition_to(AUTONAV_BACKING_UP);
         return;
     }
 
@@ -286,137 +268,114 @@ static void process_turning(void)
     /* Check if target reached */
     if (abs_f(error) < HEADING_TOLERANCE) {
         printk("AUTONAV: Target heading reached (%.1f)\n", (double)target_heading);
+        yaw_controller_set_target(0.0f);
         transition_to(AUTONAV_HEADING_HOLD);
         return;
     }
 
-    /* Proportional turn rate with minimum speed
-     * Note: error > 0 means target > current, need CCW (negative angular)
+    /* Calculate desired yaw rate (outer loop)
+     * Proportional with minimum rate for smooth approach
+     * Positive error → need CCW rotation → negative yaw rate (yaw controller convention)
      */
-    float angular_f = -error * TURNING_KP;
+    float desired_yaw_rate = -error * TURNING_KP;
 
-    /* Apply minimum speed (maintain sign for direction)
-     * error > 0 → need CCW → negative angular
+    /* Ensure minimum yaw rate for smooth approach
+     * error > 0 → need CCW → need negative rate (yaw controller convention)
      */
-    if (abs_f(angular_f) < TURNING_MIN_SPEED) {
-        angular_f = (error > 0) ? -TURNING_MIN_SPEED : TURNING_MIN_SPEED;
+    if (abs_f(desired_yaw_rate) < TURNING_MIN_YAW_RATE) {
+        desired_yaw_rate = (error > 0) ? -TURNING_MIN_YAW_RATE : TURNING_MIN_YAW_RATE;
     }
 
-    int16_t angular = clamp_i16((int16_t)angular_f,
-                                -AUTONAV_SPEED_ANGULAR, AUTONAV_SPEED_ANGULAR);
+    /* Clamp to max yaw rate */
+    if (desired_yaw_rate > AUTONAV_YAW_RATE_MAX) desired_yaw_rate = AUTONAV_YAW_RATE_MAX;
+    if (desired_yaw_rate < -AUTONAV_YAW_RATE_MAX) desired_yaw_rate = -AUTONAV_YAW_RATE_MAX;
 
+    /* Set target for inner yaw rate controller */
+    yaw_controller_set_target(desired_yaw_rate);
+
+    /* Send zero linear (turning in place) */
     struct motor_cmd cmd = {
         .linear = 0,
-        .angular = angular,
+        .angular = 0,  /* Ignored - yaw controller provides angular */
     };
     k_msgq_put(&motor_cmd_q, &cmd, K_NO_WAIT);
 }
 
-/* ============================================================================
- * Backing Up Logic
- * ============================================================================ */
+/* Scanning parameters */
+#define SCAN_YAW_RATE       10.0f   /* Slow scan speed (°/s) */
+#define SCAN_CLEAR_DIST     400.0f  /* Distance threshold for "clear" (mm) */
+#define SCAN_MAX_ANGLE      180.0f  /* Maximum scan angle before giving up */
 
 /**
- * Calculate proportional turn angle based on Kalman-filtered IR distances
+ * Process scanning state - continuous slow scan to find clear path
  *
- * The turn angle depends on:
- * 1. Difference between left/right (bigger diff → turn more toward open side)
- * 2. Tightness of situation (less space → need bigger turn)
+ * Strategy:
+ * 1. Turn slowly (10°/s) in scan direction
+ * 2. Continuously check IR distance
+ * 3. As soon as distance > 400mm → found clear path, go there
+ * 4. If turned 180° without finding clear path → reverse scan direction
+ * 5. If still no path after 360° total → back up and retry
  *
- * @param left_mm  Kalman-filtered left distance
- * @param right_mm Kalman-filtered right distance
- * @return Turn angle in degrees to add to target_heading
- *         (positive = CCW/left = heading increases, negative = CW/right = heading decreases)
+ * scan_phase: 0 = scanning left (CCW), 1 = scanning right (CW)
  */
-static float calculate_turn_angle(float left_mm, float right_mm)
+static void process_scanning(void)
 {
-    float diff = right_mm - left_mm;  /* positive = more space on right */
-    float min_dist = (left_mm < right_mm) ? left_mm : right_mm;
+    float current = get_current_heading();
+    float angle_scanned = abs_f(heading_delta(current, scan_origin_heading));
 
-    /* Both sides similar (diff < 50mm) → U-turn */
-    if (abs_f(diff) < 50.0f) {
-        return 180.0f;
-    }
-
-    /*
-     * Proportional turn angle calculation:
-     *
-     * diff_factor (0-1): How much more space on one side
-     *   - 0 = equal space
-     *   - 1 = 400mm+ difference (one side much freer)
-     *
-     * tight_factor (0-1): How tight the situation is
-     *   - 0 = plenty of space (min_dist >= OBSTACLE_DIST_AVOID)
-     *   - 1 = very tight (min_dist = 0)
-     *
-     * Final angle = 45° base + up to 45° for diff + up to 45° for tightness
-     * Range: 45° to 135°
-     */
-    float diff_factor = abs_f(diff) / 400.0f;
-    if (diff_factor > 1.0f) {
-        diff_factor = 1.0f;
-    }
-
-    float tight_factor = 1.0f - (min_dist / OBSTACLE_DIST_AVOID);
-    if (tight_factor < 0.0f) {
-        tight_factor = 0.0f;
-    }
-    if (tight_factor > 1.0f) {
-        tight_factor = 1.0f;
-    }
-
-    /* Calculate angle magnitude: 45° base + proportional components */
-    float turn_angle = 45.0f + diff_factor * 45.0f + tight_factor * 45.0f;
-
-    /* Apply direction:
-     * - More space on right (diff > 0) → turn right (CW) → heading decreases → negative
-     * - More space on left (diff < 0) → turn left (CCW) → heading increases → positive
-     */
-    if (diff > 0.0f) {
-        turn_angle = -turn_angle;
-    }
-
-    return turn_angle;
-}
-
-/**
- * Process backing up state - reverse from obstacle, then adjust heading
- * Uses proportional turn angle based on Kalman-filtered IR distances
- */
-static void process_backing_up(void)
-{
-    int64_t elapsed = k_uptime_get() - state_start_time;
-
-    /* Wait for backup duration */
-    if (elapsed < AUTONAV_BACKUP_DURATION) {
-        return;
-    }
-
-    /* Get Kalman-filtered distance to check if safe */
+    /* Get current IR distance */
     float left_mm, right_mm;
     ir_sensors_get_distance(&left_mm, &right_mm);
     float min_dist = (left_mm < right_mm) ? left_mm : right_mm;
 
-    if (min_dist > OBSTACLE_DIST_CRITICAL) {
-        /* Safe to resume - calculate proportional turn angle */
-        float turn_angle = calculate_turn_angle(left_mm, right_mm);
+    /* Send linear=0 while scanning */
+    struct motor_cmd cmd = { .linear = 0, .angular = 0 };
+    k_msgq_put(&motor_cmd_q, &cmd, K_NO_WAIT);
 
-        printk("AUTONAV: Backed up (L=%.0f R=%.0f mm), turn %.0f deg\n",
-               (double)left_mm, (double)right_mm, (double)turn_angle);
+    /* Check if we found a clear path */
+    if (min_dist >= SCAN_CLEAR_DIST) {
+        printk("SCAN: Found clear path at heading %.0f (dist=%.0f mm)\n",
+               (double)current, (double)min_dist);
+        yaw_controller_set_target(0.0f);
+        target_heading = current;
+        transition_to(AUTONAV_HEADING_HOLD);
+        return;
+    }
 
-        /* Update target heading */
-        target_heading = normalize_heading(target_heading + turn_angle);
-        printk("AUTONAV: New target heading = %.1f\n", (double)target_heading);
+    /* Check if we've scanned far enough in current direction */
+    if (angle_scanned >= SCAN_MAX_ANGLE) {
+        if (scan_phase == 0) {
+            /* Finished scanning left, now scan right */
+            printk("SCAN: No clear path left, trying right\n");
+            scan_phase = 1;
+            scan_origin_heading = current;  /* Reset origin for right scan */
+        } else {
+            /* Scanned both directions, no clear path found */
+            printk("SCAN: No clear path found! Backing up...\n");
+            yaw_controller_set_target(0.0f);
+            /* Just pick a direction (right) and hope for the best */
+            target_heading = normalize_heading(current + 90.0f);
+            transition_to(AUTONAV_TURNING);
+            return;
+        }
+    }
 
-        /* Transition to turning to reach new heading */
-        transition_to(AUTONAV_TURNING);
-    } else {
-        /* Still too close, keep backing */
-        printk("AUTONAV: Still blocked (%.0f mm), continuing backup\n",
-               (double)min_dist);
-        state_start_time = k_uptime_get();
+    /* Continue scanning in current direction
+     * scan_phase 0 = CCW → negative yaw rate (yaw controller convention)
+     * scan_phase 1 = CW → positive yaw rate
+     */
+    float scan_rate = (scan_phase == 0) ? -SCAN_YAW_RATE : SCAN_YAW_RATE;
+    yaw_controller_set_target(scan_rate);
+
+    /* Debug output every ~1 second */
+    static int scan_debug_counter = 0;
+    if (++scan_debug_counter >= 20) {
+        scan_debug_counter = 0;
+        printk("SCAN: phase=%d angle=%.0f dist=%.0f\n",
+               scan_phase, (double)angle_scanned, (double)min_dist);
     }
 }
+
 
 /* ============================================================================
  * Thread Function
@@ -448,8 +407,8 @@ static void autonav_thread_fn(void *p1, void *p2, void *p3)
             process_turning();
             break;
 
-        case AUTONAV_BACKING_UP:
-            process_backing_up();
+        case AUTONAV_SCANNING:
+            process_scanning();
             break;
 
         default:
@@ -515,6 +474,9 @@ void autonav_disable(void)
 
     k_mutex_unlock(&autonav_mutex);
 
+    /* Reset yaw controller target (manual control takes over via triggers) */
+    yaw_controller_set_target(0.0f);
+
     /* Stop motors and play sound outside mutex */
     motor_emergency_stop();
     audio_play(SOUND_DISCONNECTED);
@@ -551,6 +513,9 @@ void autonav_manual_override(void)
 
     k_mutex_unlock(&autonav_mutex);
 
+    /* Reset yaw controller target (manual control takes over via triggers) */
+    yaw_controller_set_target(0.0f);
+
     /* Stop motors and play sound outside mutex */
     motor_emergency_stop();
     audio_play(SOUND_OBSTACLE);
@@ -566,10 +531,10 @@ void autonav_turn_relative(int16_t degrees)
         return;
     }
 
-    /* Ignore if already turning */
-    if (current_state == AUTONAV_TURNING) {
+    /* Ignore if already turning or scanning */
+    if (current_state == AUTONAV_TURNING || current_state == AUTONAV_SCANNING) {
         k_mutex_unlock(&autonav_mutex);
-        printk("AUTONAV: Turn ignored (already turning)\n");
+        printk("AUTONAV: Turn ignored (busy: state=%d)\n", current_state);
         return;
     }
 

@@ -97,12 +97,14 @@ struct motor_cmd {
 #define XBOX_BTN_XBOX       0x0400
 
 /**
- * D-Pad values (hat switch) for Xbox Wireless Controller BLE
- * Standard hat switch: 1=Up, 3=Right, 5=Down, 7=Left
- * Diagonals: 2=Up-Right, 4=Down-Right, 6=Down-Left, 8=Up-Left
- * 0 = Neutral (no direction pressed)
+ * D-Pad values (hat switch) for PS5 Wireless Controller BLE
+ * PS5 uses 1-indexed format with 0 as neutral:
+ * 0=Neutral, 1=Up, 2=Up-Right, 3=Right, 4=Down-Right,
+ * 5=Down, 6=Down-Left, 7=Left, 8=Up-Left
+ *
+ * Note: Xbox uses 0-indexed (0=Up, 8=Neutral) but we support PS5 here
  */
-#define XBOX_DPAD_NONE      0x00
+#define XBOX_DPAD_NONE      0x00  /* Neutral - no direction pressed */
 #define XBOX_DPAD_UP        0x01
 #define XBOX_DPAD_UP_RIGHT  0x02
 #define XBOX_DPAD_RIGHT     0x03

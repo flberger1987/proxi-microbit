@@ -19,11 +19,15 @@
  * Wire format: Little-endian (ARM native)
  * Update rate: ~20 Hz (50ms interval)
  *
- * Python struct format: '<BBIhhhhhHHbbBBHhhhhhh'
+ * Python struct format: '<BBIhhHhHHbbBBHhhhhhh'
  */
 
-#define TELEMETRY_MAGIC   0xAB
-#define TELEMETRY_VERSION 0x01
+#define TELEMETRY_MAGIC         0xAB
+#define TELEMETRY_VERSION       0x01
+
+/* Thread stats packet magic */
+#define TELEMETRY_THREAD_MAGIC  0xAC
+#define TELEMETRY_THREAD_VER    0x01
 
 #pragma pack(push, 1)
 struct telemetry_packet {
@@ -70,6 +74,49 @@ _Static_assert(sizeof(struct telemetry_packet) == 36,
 /* Flag bit definitions */
 #define TELEMETRY_FLAG_AUTONAV_ENABLED  0x01
 #define TELEMETRY_FLAG_MOTORS_ENABLED   0x02
+
+/* ============================================================================
+ * Thread Stats Packet Structure (12 bytes)
+ * ============================================================================
+ *
+ * Sent in round-robin: 1 thread per main packet (at 20Hz = ~2 updates/thread/s)
+ * Python struct format: '<BBBBIHH'
+ */
+
+/* Thread ID enum - matches firmware thread creation order */
+enum thread_id {
+    THREAD_ID_MAIN = 0,
+    THREAD_ID_MOTOR,
+    THREAD_ID_SENSOR,
+    THREAD_ID_BLE_CTRL,     /* ble_central.c sets name "ble_ctrl" */
+    THREAD_ID_TELEMETRY,
+    THREAD_ID_AUDIO,
+    THREAD_ID_IR_SENSORS,   /* ir_sensors.c sets name "ir_sensors" */
+    THREAD_ID_AUTONAV,      /* autonomous_nav.c sets name "autonav" */
+    THREAD_ID_IDLE,         /* System idle thread */
+    THREAD_ID_COUNT
+};
+
+#pragma pack(push, 1)
+struct thread_stats_packet {
+    /* Header (4 bytes) */
+    uint8_t  magic;              /* 0xAC - Thread stats packet */
+    uint8_t  version;            /* 0x01 - Protocol version */
+    uint8_t  thread_id;          /* enum thread_id */
+    uint8_t  thread_count;       /* Total threads being monitored */
+
+    /* Timestamp (4 bytes) */
+    uint32_t timestamp_ms;       /* Uptime in milliseconds */
+
+    /* Thread Stats (4 bytes) */
+    uint16_t cpu_permille;       /* CPU usage * 10 (0-1000 = 0.0% - 100.0%) */
+    uint16_t stack_used;         /* Stack used in bytes */
+};
+#pragma pack(pop)
+
+/* Verify struct size at compile time */
+_Static_assert(sizeof(struct thread_stats_packet) == 12,
+               "Thread stats packet must be exactly 12 bytes");
 
 /* ============================================================================
  * Public API

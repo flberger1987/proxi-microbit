@@ -110,8 +110,8 @@ int16_t yaw_controller_update(float measured_rate)
         return 0;
     }
 
-    /* If target is near zero (< 5°/s), don't control - just stop */
-    if (target_yaw_rate > -5.0f && target_yaw_rate < 5.0f) {
+    /* If target is near zero (< 2°/s), don't control - just stop */
+    if (target_yaw_rate > -2.0f && target_yaw_rate < 2.0f) {
         /* Reset integral to prevent windup when idle */
         integral_term = 0.0f;
         last_output = 0.0f;

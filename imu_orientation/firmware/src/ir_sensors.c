@@ -44,7 +44,7 @@
 #define IR_LED_PIN_P12      12
 
 /* Thread configuration */
-#define IR_THREAD_STACK_SIZE 768
+#define IR_THREAD_STACK_SIZE 1024  /* Increased from 768 for printk with floats */
 #define IR_THREAD_PRIORITY   8
 #define IR_SAMPLE_INTERVAL_MS 50  /* 20 Hz sampling */
 

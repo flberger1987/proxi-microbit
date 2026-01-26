@@ -16,6 +16,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/bluetooth/services/nus.h>
+#include <string.h>
 
 /* ============================================================================
  * Thread Configuration
@@ -33,6 +34,158 @@ static struct k_thread telemetry_thread_data;
  * ============================================================================ */
 
 static volatile bool telemetry_enabled = true;  /* Enabled by default */
+
+/* Thread monitoring - maps thread_id to kernel thread pointer */
+static struct k_thread *monitored_threads[THREAD_ID_COUNT] = {0};
+static const char *thread_names[THREAD_ID_COUNT] = {
+    "main", "motor", "sensor", "ble_ctrl", "telemetry", "audio",
+    "ir_sensors", "autonav", "idle"
+};
+static uint8_t current_thread_idx = 0;  /* Round-robin index */
+
+/* Previous runtime stats for delta calculation */
+static uint64_t prev_runtime[THREAD_ID_COUNT] = {0};
+static uint64_t prev_timestamp = 0;
+
+/* ============================================================================
+ * Thread Monitoring Functions
+ * ============================================================================ */
+
+#ifdef CONFIG_THREAD_MONITOR
+/**
+ * Callback for k_thread_foreach - match thread by name
+ */
+static void thread_foreach_cb(const struct k_thread *thread, void *user_data)
+{
+    ARG_UNUSED(user_data);
+    const char *name = k_thread_name_get((k_tid_t)thread);
+    if (!name) return;
+
+    for (int i = 0; i < THREAD_ID_COUNT; i++) {
+        if (strcmp(name, thread_names[i]) == 0) {
+            monitored_threads[i] = (struct k_thread *)thread;
+            break;
+        }
+    }
+}
+#endif
+
+/**
+ * Find threads by name and populate monitored_threads array
+ */
+static void discover_threads(void)
+{
+#ifdef CONFIG_THREAD_MONITOR
+    /* Use k_thread_foreach to iterate all threads */
+    k_thread_foreach(thread_foreach_cb, NULL);
+
+    /* Count discovered threads and print names */
+    int count = 0;
+    for (int i = 0; i < THREAD_ID_COUNT; i++) {
+        if (monitored_threads[i]) {
+            count++;
+            printk("  Thread[%d] '%s' found\n", i, thread_names[i]);
+        } else {
+            printk("  Thread[%d] '%s' NOT found\n", i, thread_names[i]);
+        }
+    }
+    printk("Thread monitoring: %d/%d threads found\n", count, THREAD_ID_COUNT);
+#else
+    printk("Thread monitoring: disabled (CONFIG_THREAD_MONITOR not set)\n");
+#endif
+}
+
+/**
+ * Get thread stats and send packet for one thread (round-robin)
+ */
+static void send_thread_stats(void)
+{
+#if defined(CONFIG_THREAD_MONITOR) && defined(CONFIG_SCHED_THREAD_USAGE)
+    /* Find next valid thread */
+    int attempts = 0;
+    while (attempts < THREAD_ID_COUNT) {
+        if (monitored_threads[current_thread_idx] != NULL) {
+            break;
+        }
+        current_thread_idx = (current_thread_idx + 1) % THREAD_ID_COUNT;
+        attempts++;
+    }
+
+    if (attempts >= THREAD_ID_COUNT) {
+        return;  /* No threads to monitor */
+    }
+
+    struct k_thread *thread = monitored_threads[current_thread_idx];
+    struct thread_stats_packet pkt;
+
+    /* Header */
+    pkt.magic = TELEMETRY_THREAD_MAGIC;
+    pkt.version = TELEMETRY_THREAD_VER;
+    pkt.thread_id = current_thread_idx;
+    pkt.thread_count = THREAD_ID_COUNT;
+    pkt.timestamp_ms = k_uptime_get_32();
+
+    /* Get thread runtime stats */
+    k_thread_runtime_stats_t stats;
+    uint16_t cpu_permille = 0;
+
+    if (k_thread_runtime_stats_get((k_tid_t)thread, &stats) == 0) {
+        /* Calculate CPU usage since last measurement */
+        uint64_t now = k_uptime_get();
+        uint64_t delta_time = now - prev_timestamp;
+
+        if (delta_time > 0 && prev_timestamp > 0) {
+            uint64_t delta_runtime = stats.execution_cycles - prev_runtime[current_thread_idx];
+            /* Convert to permille (0.1%) - cycles to time ratio */
+            uint64_t total_cycles = (delta_time * CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC) / 1000;
+            if (total_cycles > 0) {
+                cpu_permille = (uint16_t)((delta_runtime * 1000) / total_cycles);
+                if (cpu_permille > 1000) cpu_permille = 1000;
+            }
+        }
+
+        prev_runtime[current_thread_idx] = stats.execution_cycles;
+        if (current_thread_idx == 0) {
+            prev_timestamp = now;  /* Update timestamp once per round */
+        }
+    }
+    pkt.cpu_permille = cpu_permille;
+
+    /* Get stack usage */
+#ifdef CONFIG_THREAD_STACK_INFO
+    size_t unused = 0;
+    size_t size = thread->stack_info.size;
+    if (k_thread_stack_space_get(thread, &unused) == 0) {
+        pkt.stack_used = (uint16_t)(size - unused);
+    } else {
+        pkt.stack_used = 0;
+    }
+#else
+    pkt.stack_used = 0;
+#endif
+
+    /* Send packet */
+    int ret = bt_nus_send(NULL, (const uint8_t *)&pkt, sizeof(pkt));
+
+    /* Debug: print thread stats occasionally */
+    static uint32_t send_count = 0;
+    if (++send_count % 100 == 0) {  /* Every 5 seconds (100 * 50ms) */
+        printk("THREAD_STAT: %s cpu=%d.%d%% stack=%d (ret=%d)\n",
+               thread_names[pkt.thread_id],
+               pkt.cpu_permille / 10, pkt.cpu_permille % 10,
+               pkt.stack_used, ret);
+    }
+
+    /* Advance to next thread for next call */
+    current_thread_idx = (current_thread_idx + 1) % THREAD_ID_COUNT;
+#else
+    /* Thread stats disabled */
+    (void)monitored_threads;
+    (void)current_thread_idx;
+    (void)prev_runtime;
+    (void)prev_timestamp;
+#endif
+}
 
 /* ============================================================================
  * Telemetry Thread
@@ -107,7 +260,7 @@ static void telemetry_thread_fn(void *p1, void *p2, void *p3)
         sensors_get_raw_accel(&pkt.raw_ax, &pkt.raw_ay, &pkt.raw_az);
         sensors_get_raw_mag(&pkt.raw_mx, &pkt.raw_my, &pkt.raw_mz);
 
-        /* === Send packet over BLE NUS === */
+        /* === Send main telemetry packet over BLE NUS === */
         ret = bt_nus_send(NULL, (const uint8_t *)&pkt, sizeof(pkt));
         if (ret && ret != -ENOTCONN) {
             /* Don't spam errors - only log occasionally */
@@ -118,6 +271,9 @@ static void telemetry_thread_fn(void *p1, void *p2, void *p3)
                 last_error_log = now;
             }
         }
+
+        /* === Send thread stats packet (round-robin, one per cycle) === */
+        send_thread_stats();
 
         k_msleep(TELEMETRY_INTERVAL_MS);
     }
@@ -135,11 +291,16 @@ int telemetry_init(void)
 
 void telemetry_start_thread(void)
 {
+    /* Create telemetry thread first */
     k_thread_create(&telemetry_thread_data, telemetry_stack,
                     K_THREAD_STACK_SIZEOF(telemetry_stack),
                     telemetry_thread_fn, NULL, NULL, NULL,
                     TELEMETRY_PRIORITY, 0, K_NO_WAIT);
     k_thread_name_set(&telemetry_thread_data, "telemetry");
+
+    /* Discover threads after a delay (let all threads start and set their names) */
+    k_msleep(200);
+    discover_threads();
 }
 
 void telemetry_enable(bool enable)

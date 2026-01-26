@@ -402,6 +402,11 @@ static void on_controller_connected(void)
     yaw_controller_enable(true);  /* Enable yaw rate control */
 }
 
+/* Previous button state for edge detection */
+static uint16_t prev_controller_buttons = 0;
+static uint8_t prev_dpad = XBOX_DPAD_NONE;
+static bool first_hid_report = true;  /* Ignore D-Pad on first report */
+
 static void on_controller_disconnected(void)
 {
     printk("Controller disconnected!\n");
@@ -410,11 +415,12 @@ static void on_controller_disconnected(void)
     motor_emergency_stop();
     yaw_controller_enable(false);
     yaw_controller_reset();
-}
 
-/* Previous button state for edge detection */
-static uint16_t prev_controller_buttons = 0;
-static uint8_t prev_dpad = XBOX_DPAD_NONE;
+    /* Reset D-Pad state for next connection */
+    first_hid_report = true;
+    prev_dpad = XBOX_DPAD_NONE;
+    prev_controller_buttons = 0;
+}
 
 static void on_controller_input(const uint8_t *data, uint16_t len)
 {
@@ -429,12 +435,35 @@ static void on_controller_input(const uint8_t *data, uint16_t len)
     /* Detect button press edges (just pressed this frame) */
     uint16_t just_pressed = (input.buttons ^ prev_controller_buttons) & input.buttons;
 
-    /* Detect D-Pad edges (just pressed this frame) */
+    /* Detect D-Pad edges (just pressed this frame)
+     * Ignore first HID report to prevent auto-start if controller sends dpad=0 on connect */
     bool dpad_changed = (input.dpad != prev_dpad);
-    bool dpad_up_pressed = dpad_changed && (input.dpad == XBOX_DPAD_UP);
-    bool dpad_down_pressed = dpad_changed && (input.dpad == XBOX_DPAD_DOWN);
-    bool dpad_left_pressed = dpad_changed && (input.dpad == XBOX_DPAD_LEFT);
-    bool dpad_right_pressed = dpad_changed && (input.dpad == XBOX_DPAD_RIGHT);
+    bool dpad_up_pressed = false;
+    bool dpad_down_pressed = false;
+    bool dpad_left_pressed = false;
+    bool dpad_right_pressed = false;
+
+    if (first_hid_report) {
+        /* First report - just record state, don't trigger any actions */
+        first_hid_report = false;
+        printk("HID: First report dpad=%d (0x%02X) (ignoring for autonav)\n", input.dpad, input.dpad);
+    } else if (dpad_changed) {
+        /* Log ALL D-Pad changes for debugging */
+        printk("DPAD: %d->%d (0x%02X->0x%02X) prev_none=%d\n",
+               prev_dpad, input.dpad, prev_dpad, input.dpad,
+               (prev_dpad == XBOX_DPAD_NONE));
+
+        /* Only trigger on transition from NONE to a direction */
+        if (prev_dpad == XBOX_DPAD_NONE) {
+            dpad_up_pressed = (input.dpad == XBOX_DPAD_UP);
+            dpad_down_pressed = (input.dpad == XBOX_DPAD_DOWN);
+            dpad_left_pressed = (input.dpad == XBOX_DPAD_LEFT);
+            dpad_right_pressed = (input.dpad == XBOX_DPAD_RIGHT);
+
+            printk("DPAD: UP=%d DOWN=%d LEFT=%d RIGHT=%d\n",
+                   dpad_up_pressed, dpad_down_pressed, dpad_left_pressed, dpad_right_pressed);
+        }
+    }
 
     /* ========== D-Pad Handling (BEFORE manual override check!) ========== */
     /*
@@ -448,7 +477,7 @@ static void on_controller_input(const uint8_t *data, uint16_t len)
      * D-Pad NEVER disables autonomous mode - only stick/trigger does that.
      */
     enum autonav_state nav_state = autonav_get_state();
-    bool is_turning = (nav_state == AUTONAV_TURNING);
+    bool is_turning = (nav_state == AUTONAV_TURNING || nav_state == AUTONAV_SCANNING);
 
     /* D-Pad UP: Enable autonomous mode / confirm forward direction */
     if (dpad_up_pressed) {
