@@ -413,8 +413,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
     /* Update robot state */
     robot_set_state(ROBOT_STATE_IDLE);
 
-    /* Resume NUS advertising since Xbox controller disconnected */
-    smp_bt_resume_advertising();
+    /* Advertising continues - no need to resume (multi-role active) */
 
     /* Notify callback */
     if (callbacks.disconnected) {
@@ -577,8 +576,7 @@ static void scan_timeout_handler(struct k_work *work)
         bt_le_scan_stop();
         is_scanning = false;
         robot_set_state(ROBOT_STATE_IDLE);
-        /* Resume NUS advertising since scan ended */
-        smp_bt_resume_advertising();
+        /* Advertising continues - no need to resume (multi-role active) */
 
         /* If we have a bonded controller, schedule another scan attempt
          * This handles the case where the controller was turned off and
@@ -695,8 +693,8 @@ int ble_central_start_scan(void)
         return -EISCONN;
     }
 
-    /* Pause NUS advertising to avoid dual-role conflicts */
-    smp_bt_pause_advertising();
+    /* Note: nRF52833 supports multi-role BLE - keep advertising while scanning
+     * so dashboard can connect before/during Xbox pairing */
 
     struct bt_le_scan_param scan_param = {
         .type = BT_LE_SCAN_TYPE_ACTIVE,

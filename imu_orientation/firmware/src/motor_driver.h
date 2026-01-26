@@ -59,4 +59,12 @@ bool motor_is_active(void);
  */
 void motor_enable(bool enable);
 
+/**
+ * Get current motor command values (for telemetry)
+ *
+ * @param linear Pointer to store linear velocity (-100 to +100)
+ * @param angular Pointer to store angular velocity (-100 to +100)
+ */
+void motor_get_current_cmd(int8_t *linear, int8_t *angular);
+
 #endif /* MOTOR_DRIVER_H */

@@ -910,6 +910,53 @@ Beispiel: `IMU,12345,2.5,-1.2,180.3\r\n`
 |--------|---------|--------------|
 | `CAL` | `CAL:OK` / `CAL:BUSY` | Magnetometer-Kalibrierung starten |
 | `VER` | `VER:1.0.0-ble` | Firmware-Version abfragen |
+| `IMU` | `IMU:ON` / `IMU:OFF` | IMU Text-Streaming togglen |
+| `TELE` | `TELE:ON` / `TELE:OFF` | Binary-Telemetrie togglen |
+| `TELEON` | `TELE:ON` | Binary-Telemetrie aktivieren |
+| `TELEOFF` | `TELE:OFF` | Binary-Telemetrie deaktivieren |
+| `IRD` | `IRD:ON` / `IRD:OFF` | IR Debug-Ausgabe togglen |
+| `HELP` | `CMD:VER,CAL,...` | Verfügbare Befehle auflisten |
+
+### BLE Binary-Telemetrie (Dashboard)
+
+Die Firmware sendet ~20Hz binary Telemetrie-Pakete über NUS.
+
+**Verbindungsstrategie:** Dashboard **vor** Xbox Controller verbinden!
+1. Dashboard via NUS verbinden
+2. Dann Xbox Controller verbinden
+3. NUS bleibt aktiv (Advertising pausiert nur)
+
+**Paketformat (36 Bytes, Little-Endian):**
+
+```c
+struct telemetry_packet {
+    uint8_t  magic;              /* 0xAB - Sync-Byte */
+    uint8_t  version;            /* 0x01 - Protokoll-Version */
+    uint32_t timestamp_ms;       /* Uptime in ms */
+
+    int16_t  roll_x10;           /* Roll * 10 (0.1° Auflösung) */
+    int16_t  pitch_x10;          /* Pitch * 10 */
+    uint16_t heading_x10;        /* Heading * 10 (0-3599) */
+
+    int16_t  yaw_rate_x10;       /* Yaw Rate * 10 (°/s) */
+    uint16_t ir_left_mm;         /* IR links in mm */
+    uint16_t ir_right_mm;        /* IR rechts in mm */
+
+    int8_t   motor_linear;       /* -100 bis +100 */
+    int8_t   motor_angular;      /* -100 bis +100 */
+    uint8_t  nav_state;          /* 0=DISABLED, 1=HEADING_HOLD, 2=TURNING, 3=BACKING_UP */
+    uint8_t  flags;              /* Bit 0: autonav, Bit 1: motors */
+
+    uint16_t target_heading_x10; /* Ziel-Heading * 10 (0xFFFF = invalid) */
+
+    int16_t  raw_ax, raw_ay, raw_az; /* Accelerometer (milli-g) */
+    int16_t  raw_mx, raw_my, raw_mz; /* Magnetometer (milli-Gauss) */
+};
+```
+
+**Python struct format:** `'<BBIhhhhhHHbbBBHhhhhhh'`
+
+**Test-Script:** `tools/telemetry_receiver.py`
 
 ### Magnetometer-Kalibrierung
 

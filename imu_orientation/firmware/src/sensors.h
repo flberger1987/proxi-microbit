@@ -53,6 +53,12 @@ void sensors_set_motor_cmd(float pwm_percent);
 /* Get full current orientation data (thread-safe) */
 void sensors_get_orientation(struct orientation_data *out);
 
+/* Get raw accelerometer values (User coordinates, milli-g) */
+void sensors_get_raw_accel(int16_t *ax, int16_t *ay, int16_t *az);
+
+/* Get raw magnetometer values (User coordinates, milli-Gauss) */
+void sensors_get_raw_mag(int16_t *mx, int16_t *my, int16_t *mz);
+
 /* Message queue for orientation data (accessible by output thread) */
 extern struct k_msgq orientation_msgq;
 

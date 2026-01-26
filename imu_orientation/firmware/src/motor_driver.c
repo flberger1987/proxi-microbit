@@ -62,6 +62,10 @@ static const struct pwm_dt_spec turn_right = {0};
 /* Motor state */
 static volatile bool motors_enabled = false;
 
+/* Current motor command (for telemetry) */
+static volatile int8_t current_cmd_linear = 0;
+static volatile int8_t current_cmd_angular = 0;
+
 /* PWM period (1kHz = 1000us) */
 #define PWM_PERIOD_NS 1000000
 
@@ -198,12 +202,17 @@ static void motor_thread_fn(void *p1, void *p2, void *p3)
             if (cmd.emergency_stop) {
                 current_linear = 0;
                 current_angular = 0;
+                current_cmd_linear = 0;
+                current_cmd_angular = 0;
                 stop_all_motors();
                 yaw_controller_reset();
                 printk("EMERGENCY STOP\n");
             } else {
                 current_linear = cmd.linear;
                 current_angular = cmd.angular;
+                /* Update telemetry values */
+                current_cmd_linear = (int8_t)cmd.linear;
+                current_cmd_angular = (int8_t)cmd.angular;
             }
         }
 
@@ -325,5 +334,15 @@ void motor_enable(bool enable)
     printk("Motors %s\n", enable ? "ENABLED" : "DISABLED");
     if (!enable) {
         stop_all_motors();
+    }
+}
+
+void motor_get_current_cmd(int8_t *linear, int8_t *angular)
+{
+    if (linear) {
+        *linear = current_cmd_linear;
+    }
+    if (angular) {
+        *angular = current_cmd_angular;
     }
 }

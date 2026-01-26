@@ -19,6 +19,7 @@ target_sources(app PRIVATE
     src/serial_output.c
     src/smp_bt.c
     src/ble_output.c
+    src/telemetry.c
 
     # Xbox Controller
     src/ble_central.c

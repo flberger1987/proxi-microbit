@@ -7,6 +7,7 @@
 #include "sensors.h"
 #include "smp_bt.h"
 #include "serial_output.h"
+#include "telemetry.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
@@ -106,9 +107,23 @@ static void nus_received(struct bt_conn *conn, const void *data, uint16_t len, v
         ir_sensors_set_debug(ir_debug_on);
         bt_nus_send(conn, ir_debug_on ? "IRD:ON\r\n" : "IRD:OFF\r\n",
                     ir_debug_on ? 8 : 9);
+    } else if (strcmp(cmd, "TELE") == 0 || strcmp(cmd, "tele") == 0) {
+        /* Toggle binary telemetry streaming */
+        bool enabled = !telemetry_is_enabled();
+        telemetry_enable(enabled);
+        bt_nus_send(conn, enabled ? "TELE:ON\r\n" : "TELE:OFF\r\n",
+                    enabled ? 9 : 10);
+    } else if (strcmp(cmd, "TELEON") == 0 || strcmp(cmd, "teleon") == 0) {
+        /* Enable binary telemetry */
+        telemetry_enable(true);
+        bt_nus_send(conn, "TELE:ON\r\n", 9);
+    } else if (strcmp(cmd, "TELEOFF") == 0 || strcmp(cmd, "teleoff") == 0) {
+        /* Disable binary telemetry */
+        telemetry_enable(false);
+        bt_nus_send(conn, "TELE:OFF\r\n", 10);
     } else if (strcmp(cmd, "HELP") == 0 || strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         /* List available commands */
-        bt_nus_send(conn, "CMD:VER,CAL,IMU,IRD,HELP\r\n", 26);
+        bt_nus_send(conn, "CMD:VER,CAL,IMU,IRD,TELE,HELP\r\n", 31);
     } else {
         /* Unknown command */
         bt_nus_send(conn, "ERR:UNKNOWN\r\n", 13);

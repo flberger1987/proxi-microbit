@@ -37,6 +37,7 @@
 #include "ir_sensors.h"
 #include "autonomous_nav.h"
 #include "yaw_controller.h"
+#include "telemetry.h"
 
 /* ============================================================================
  * Display Animations
@@ -536,8 +537,8 @@ static void on_controller_input(const uint8_t *data, uint16_t len)
     prev_controller_buttons = input.buttons;
 
     /* ========== Motor Control ========== */
-    /* Skip sending motor commands if in autonomous mode or yaw test (autonav controls motors) */
-    if (autonav_is_enabled() || autonav_is_yaw_test_running()) {
+    /* Skip sending motor commands if in autonomous mode (autonav controls motors) */
+    if (autonav_is_enabled()) {
         return;
     }
 
@@ -753,6 +754,12 @@ int main(void)
         printk("WARNING: Yaw controller init failed (err %d)\n", ret);
     }
 
+    /* Initialize telemetry */
+    ret = telemetry_init();
+    if (ret != 0) {
+        printk("WARNING: Telemetry init failed (err %d)\n", ret);
+    }
+
     /* Start all threads */
     sensors_start_thread();
     serial_output_start_thread();
@@ -763,6 +770,7 @@ int main(void)
     motor_test_start_thread();
     ir_sensors_start_thread();
     autonav_start_thread();
+    telemetry_start_thread();
 
     printk("All threads started.\n");
 

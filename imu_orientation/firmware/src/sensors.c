@@ -261,6 +261,10 @@ K_MSGQ_DEFINE(orientation_msgq, sizeof(struct sensor_msg), 10, 4);
 /* Current orientation (updated by sensor thread, read by other modules) */
 static volatile struct orientation_data current_orientation;
 
+/* Current raw sensor values (for telemetry) */
+static volatile int16_t current_raw_ax, current_raw_ay, current_raw_az;
+static volatile int16_t current_raw_mx, current_raw_my, current_raw_mz;
+
 float sensors_get_heading(void)
 {
     return current_orientation.heading;
@@ -479,6 +483,14 @@ static void sensor_thread_fn(void *p1, void *p2, void *p3)
         msg.raw_my = (int16_t)(my * 1000.0f);
         msg.raw_mz = (int16_t)(mz * 1000.0f);
 
+        /* Store for telemetry access */
+        current_raw_ax = msg.raw_ax;
+        current_raw_ay = msg.raw_ay;
+        current_raw_az = msg.raw_az;
+        current_raw_mx = msg.raw_mx;
+        current_raw_my = msg.raw_my;
+        current_raw_mz = msg.raw_mz;
+
         /* Update calibration if in progress */
         if (calibrating) {
             update_calibration(mx, my, mz);
@@ -550,4 +562,18 @@ void sensors_start_thread(void)
                     sensor_thread_fn, NULL, NULL, NULL,
                     SENSOR_PRIORITY, 0, K_NO_WAIT);
     k_thread_name_set(&sensor_thread_data, "sensor");
+}
+
+void sensors_get_raw_accel(int16_t *ax, int16_t *ay, int16_t *az)
+{
+    if (ax) *ax = current_raw_ax;
+    if (ay) *ay = current_raw_ay;
+    if (az) *az = current_raw_az;
+}
+
+void sensors_get_raw_mag(int16_t *mx, int16_t *my, int16_t *mz)
+{
+    if (mx) *mx = current_raw_mx;
+    if (my) *my = current_raw_my;
+    if (mz) *mz = current_raw_mz;
 }
