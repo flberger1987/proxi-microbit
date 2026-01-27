@@ -59,14 +59,24 @@ static void adv_restart_handler(struct k_work *work)
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
+    /* Only handle peripheral connections (dashboard connecting to us).
+     * Ignore central connections (us connecting to Xbox controller).
+     */
+    struct bt_conn_info info;
+    if (bt_conn_get_info(conn, &info) == 0) {
+        if (info.role != BT_CONN_ROLE_PERIPHERAL) {
+            return;  /* Ignore central connections */
+        }
+    }
+
     if (err) {
-        printk("BLE: Connection failed (err %u)\n", err);
+        printk("BLE: Dashboard connection failed (err %u)\n", err);
         return;
     }
 
     current_conn = bt_conn_ref(conn);
     ble_connected = true;
-    printk("BLE: Connected\n");
+    printk("BLE: Dashboard connected\n");
 
     /* Restart advertising after 100ms to allow additional connections */
     k_work_schedule(&adv_restart_work, K_MSEC(100));
@@ -74,7 +84,15 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-    printk("BLE: Disconnected (reason %u)\n", reason);
+    /* Only handle peripheral connections (dashboard) */
+    struct bt_conn_info info;
+    if (bt_conn_get_info(conn, &info) == 0) {
+        if (info.role != BT_CONN_ROLE_PERIPHERAL) {
+            return;  /* Ignore central connections */
+        }
+    }
+
+    printk("BLE: Dashboard disconnected (reason %u)\n", reason);
 
     if (current_conn) {
         bt_conn_unref(current_conn);
@@ -82,7 +100,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     }
     ble_connected = false;
 
-    /* Always restart advertising after disconnect */
+    /* Always restart advertising after dashboard disconnect */
     k_work_schedule(&adv_restart_work, K_MSEC(100));
 }
 

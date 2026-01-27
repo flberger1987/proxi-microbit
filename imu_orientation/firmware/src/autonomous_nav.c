@@ -8,6 +8,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/settings/settings.h>
 
 #include "autonomous_nav.h"
 #include "robot_state.h"
@@ -51,6 +52,85 @@ static float scan_origin_heading; /* Heading when scan started */
 
 /* Heading PI controller state */
 static float heading_integral = 0.0f;  /* Integral term for heading error */
+
+/* ============================================================================
+ * Runtime-adjustable Controller Parameters
+ * ============================================================================ */
+
+/* These can be modified via BLE commands and saved to flash */
+static float runtime_heading_kp = HEADING_KP;
+static float runtime_heading_ki = HEADING_KI;
+static float runtime_heading_kd = HEADING_KD;
+static float runtime_heading_i_max = HEADING_I_MAX;
+static float runtime_heading_d_max = HEADING_D_MAX;
+static float runtime_yaw_rate_max = AUTONAV_YAW_RATE_MAX;
+
+/* Previous error for derivative calculation */
+static float prev_heading_error = 0.0f;
+
+/* ============================================================================
+ * PID Settings Flash Persistence
+ * ============================================================================ */
+
+#define PID_SETTINGS_VERSION 2  /* Incremented for KD addition */
+
+struct pid_settings {
+    uint8_t version;
+    float kp;
+    float ki;
+    float kd;
+    float i_max;
+    float d_max;
+    float yaw_max;
+};
+
+static int pid_settings_set(const char *name, size_t len,
+                            settings_read_cb read_cb, void *cb_arg)
+{
+    if (strcmp(name, "data") == 0) {
+        struct pid_settings loaded;
+        ssize_t rc = read_cb(cb_arg, &loaded, sizeof(loaded));
+        if (rc < 0) {
+            return rc;
+        }
+        if (rc != sizeof(loaded)) {
+            return -EINVAL;
+        }
+        if (loaded.version != PID_SETTINGS_VERSION) {
+            printk("PID: Ignoring old settings version %d\n", loaded.version);
+            return 0;
+        }
+        runtime_heading_kp = loaded.kp;
+        runtime_heading_ki = loaded.ki;
+        runtime_heading_kd = loaded.kd;
+        runtime_heading_i_max = loaded.i_max;
+        runtime_heading_d_max = loaded.d_max;
+        runtime_yaw_rate_max = loaded.yaw_max;
+        printk("PID: Loaded from flash: KP=%.2f KI=%.3f KD=%.2f IMAX=%.1f DMAX=%.1f YMAX=%.1f\n",
+               (double)loaded.kp, (double)loaded.ki, (double)loaded.kd,
+               (double)loaded.i_max, (double)loaded.d_max, (double)loaded.yaw_max);
+    }
+    return 0;
+}
+
+static int pid_settings_export(int (*cb)(const char *name,
+                                         const void *value, size_t val_len))
+{
+    struct pid_settings current = {
+        .version = PID_SETTINGS_VERSION,
+        .kp = runtime_heading_kp,
+        .ki = runtime_heading_ki,
+        .kd = runtime_heading_kd,
+        .i_max = runtime_heading_i_max,
+        .d_max = runtime_heading_d_max,
+        .yaw_max = runtime_yaw_rate_max,
+    };
+    return cb("pid/data", &current, sizeof(current));
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(pid, "pid", NULL,
+                                pid_settings_set, NULL,
+                                pid_settings_export);
 
 /* ============================================================================
  * Helper Functions
@@ -225,27 +305,36 @@ static void process_heading_hold(void)
     float desired_yaw_rate = 0.0f;
     if (abs_f(heading_error) > HEADING_TOLERANCE) {
         /* P-term: proportional to error */
-        float p_term = -heading_error * HEADING_KP;
+        float p_term = -heading_error * runtime_heading_kp;
 
         /* I-term: accumulate error over time (dt = 50ms = 0.05s) */
         /* Anti-windup: only accumulate if output is not saturated */
-        bool saturated = (abs_f(p_term + heading_integral) >= AUTONAV_YAW_RATE_MAX);
+        bool saturated = (abs_f(p_term + heading_integral) >= runtime_yaw_rate_max);
         if (!saturated) {
-            heading_integral += -heading_error * HEADING_KI * 0.05f;
+            heading_integral += -heading_error * runtime_heading_ki * 0.05f;
             /* Clamp integral to prevent excessive windup */
-            if (heading_integral > HEADING_I_MAX) heading_integral = HEADING_I_MAX;
-            if (heading_integral < -HEADING_I_MAX) heading_integral = -HEADING_I_MAX;
+            if (heading_integral > runtime_heading_i_max) heading_integral = runtime_heading_i_max;
+            if (heading_integral < -runtime_heading_i_max) heading_integral = -runtime_heading_i_max;
         }
 
-        /* Combined PI output */
-        desired_yaw_rate = p_term + heading_integral;
+        /* D-term: derivative of error (dt = 50ms = 0.05s) */
+        float error_derivative = (-heading_error - prev_heading_error) / 0.05f;
+        float d_term = error_derivative * runtime_heading_kd;
+        /* Clamp D-term to prevent spikes */
+        if (d_term > runtime_heading_d_max) d_term = runtime_heading_d_max;
+        if (d_term < -runtime_heading_d_max) d_term = -runtime_heading_d_max;
+        prev_heading_error = -heading_error;
+
+        /* Combined PID output */
+        desired_yaw_rate = p_term + heading_integral + d_term;
 
         /* Clamp to max yaw rate */
-        if (desired_yaw_rate > AUTONAV_YAW_RATE_MAX) desired_yaw_rate = AUTONAV_YAW_RATE_MAX;
-        if (desired_yaw_rate < -AUTONAV_YAW_RATE_MAX) desired_yaw_rate = -AUTONAV_YAW_RATE_MAX;
+        if (desired_yaw_rate > runtime_yaw_rate_max) desired_yaw_rate = runtime_yaw_rate_max;
+        if (desired_yaw_rate < -runtime_yaw_rate_max) desired_yaw_rate = -runtime_yaw_rate_max;
     } else {
         /* Within tolerance - slowly decay integral to avoid sudden jumps */
         heading_integral *= 0.9f;
+        prev_heading_error = 0.0f;
     }
 
     /* Set target for inner yaw rate controller */
@@ -607,4 +696,66 @@ float autonav_get_target_heading(void)
 
     k_mutex_unlock(&autonav_mutex);
     return result;
+}
+
+/* ============================================================================
+ * Runtime Parameter API (for BLE tuning)
+ * ============================================================================ */
+
+void autonav_set_pid_params(float kp, float ki, float kd, float i_max, float d_max, float yaw_max)
+{
+    k_mutex_lock(&autonav_mutex, K_FOREVER);
+
+    runtime_heading_kp = kp;
+    runtime_heading_ki = ki;
+    runtime_heading_kd = kd;
+    runtime_heading_i_max = i_max;
+    runtime_heading_d_max = d_max;
+    runtime_yaw_rate_max = yaw_max;
+
+    /* Reset integral and derivative terms when parameters change */
+    heading_integral = 0.0f;
+    prev_heading_error = 0.0f;
+
+    printk("AUTONAV: PID params: KP=%.2f KI=%.3f KD=%.2f IMAX=%.1f DMAX=%.1f YMAX=%.1f\n",
+           (double)kp, (double)ki, (double)kd, (double)i_max, (double)d_max, (double)yaw_max);
+
+    k_mutex_unlock(&autonav_mutex);
+}
+
+void autonav_get_pid_params(float *kp, float *ki, float *kd, float *i_max, float *d_max, float *yaw_max)
+{
+    k_mutex_lock(&autonav_mutex, K_FOREVER);
+
+    if (kp) *kp = runtime_heading_kp;
+    if (ki) *ki = runtime_heading_ki;
+    if (kd) *kd = runtime_heading_kd;
+    if (i_max) *i_max = runtime_heading_i_max;
+    if (d_max) *d_max = runtime_heading_d_max;
+    if (yaw_max) *yaw_max = runtime_yaw_rate_max;
+
+    k_mutex_unlock(&autonav_mutex);
+}
+
+int autonav_save_pid_params(void)
+{
+    struct pid_settings current = {
+        .version = PID_SETTINGS_VERSION,
+        .kp = runtime_heading_kp,
+        .ki = runtime_heading_ki,
+        .kd = runtime_heading_kd,
+        .i_max = runtime_heading_i_max,
+        .d_max = runtime_heading_d_max,
+        .yaw_max = runtime_yaw_rate_max,
+    };
+
+    int err = settings_save_one("pid/data", &current, sizeof(current));
+    if (err) {
+        printk("PID: Failed to save to flash (err %d)\n", err);
+    } else {
+        printk("PID: Saved to flash: KP=%.2f KI=%.3f KD=%.2f IMAX=%.1f DMAX=%.1f YMAX=%.1f\n",
+               (double)current.kp, (double)current.ki, (double)current.kd,
+               (double)current.i_max, (double)current.d_max, (double)current.yaw_max);
+    }
+    return err;
 }

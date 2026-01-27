@@ -21,12 +21,12 @@ class OrientationWidget(QWidget):
 
         self.setMinimumSize(200, 100)
 
-        # Colors
+        # Colors (hacker green theme)
         self.bg_color = QColor(30, 30, 30)
         self.border_color = QColor(60, 60, 60)
         self.text_color = QColor(200, 200, 200)
-        self.positive_color = QColor(0, 180, 255)
-        self.negative_color = QColor(180, 100, 255)
+        self.positive_color = QColor(0, 255, 65)   # Hacker green
+        self.negative_color = QColor(0, 255, 65)   # Hacker green
         self.center_color = QColor(100, 100, 100)
 
     def update_orientation(self, roll: float, pitch: float):
@@ -117,9 +117,7 @@ class OrientationWidget(QWidget):
             painter.drawEllipse(QRectF(indicator_x - 3, y + bar_height / 2 - 3, 6, 6))
 
             # Value
-            value_color = self.positive_color if value > 1 else (
-                self.negative_color if value < -1 else self.text_color
-            )
+            value_color = self.positive_color if abs(value) > 1 else self.text_color
             painter.setPen(value_color)
             font_value = QFont("Monospace", 9, QFont.Weight.Bold)
             painter.setFont(font_value)

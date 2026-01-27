@@ -48,19 +48,19 @@ class ThreadStatsWidget(QWidget):
         # Style
         self.table.setStyleSheet("""
             QTableWidget {
-                background-color: #1e1e1e;
+                background-color: #0d0d0d;
                 color: #cccccc;
-                gridline-color: #3c3c3c;
+                gridline-color: #2a2a2a;
                 border: none;
             }
             QTableWidget::item {
                 padding: 2px;
             }
             QHeaderView::section {
-                background-color: #2d2d2d;
-                color: #00b4ff;
+                background-color: #1a1a1a;
+                color: #00ff41;
                 padding: 4px;
-                border: 1px solid #3c3c3c;
+                border: 1px solid #2a2a2a;
                 font-weight: bold;
             }
         """)
@@ -104,34 +104,64 @@ class ThreadStatsWidget(QWidget):
 
         self.stats[thread_name] = {'cpu': cpu_percent, 'stack': stack_used}
 
-        # Find row index
-        try:
-            row = self.THREAD_NAMES.index(thread_name)
-        except ValueError:
-            return
+        # Sort and refresh display after each update
+        self._refresh_display()
 
-        # Update CPU cell
-        cpu_item = self.table.item(row, 1)
-        if cpu_item:
-            cpu_item.setText(f"{cpu_percent:.1f}")
+    def _refresh_display(self):
+        """Refresh the table sorted by CPU usage (descending)."""
+        # Calculate idle as 100% - sum of other threads
+        total_cpu = sum(s['cpu'] for name, s in self.stats.items() if name != 'idle')
+        idle_cpu = max(0.0, 100.0 - total_cpu)
+        self.stats['idle']['cpu'] = idle_cpu
 
-            # Color based on CPU usage
-            if cpu_percent > 50:
-                cpu_item.setForeground(QBrush(QColor(255, 80, 80)))  # Red
-            elif cpu_percent > 20:
-                cpu_item.setForeground(QBrush(QColor(255, 180, 0)))  # Yellow
-            else:
-                cpu_item.setForeground(QBrush(QColor(0, 200, 80)))   # Green
+        # Sort threads by CPU usage (highest first), but keep idle at bottom
+        non_idle = [(n, s) for n, s in self.stats.items() if n != 'idle']
+        sorted_threads = sorted(non_idle, key=lambda x: x[1]['cpu'], reverse=True)
+        # Add idle at the end
+        sorted_threads.append(('idle', self.stats['idle']))
 
-        # Update stack cell
-        stack_item = self.table.item(row, 2)
-        if stack_item:
-            stack_item.setText(f"{stack_used}")
+        font = QFont("Monospace", 9)
+        for row, (thread_name, stats) in enumerate(sorted_threads):
+            cpu_percent = stats['cpu']
+            stack_used = stats['stack']
 
-            # Color based on stack usage (assuming ~1KB stacks typical)
-            if stack_used > 800:
-                stack_item.setForeground(QBrush(QColor(255, 80, 80)))  # Red
-            elif stack_used > 500:
-                stack_item.setForeground(QBrush(QColor(255, 180, 0)))  # Yellow
-            else:
-                stack_item.setForeground(QBrush(QColor(200, 200, 200)))  # Normal
+            # Thread name
+            name_item = self.table.item(row, 0)
+            if name_item:
+                name_item.setText(thread_name)
+
+            # Update CPU cell
+            cpu_item = self.table.item(row, 1)
+            if cpu_item:
+                if cpu_percent > 0:
+                    cpu_item.setText(f"{cpu_percent:.1f}")
+                else:
+                    cpu_item.setText("--")
+
+                # Color based on CPU usage
+                if cpu_percent > 50:
+                    cpu_item.setForeground(QBrush(QColor(255, 80, 80)))  # Red
+                elif cpu_percent > 20:
+                    cpu_item.setForeground(QBrush(QColor(255, 180, 0)))  # Yellow
+                elif cpu_percent > 0:
+                    cpu_item.setForeground(QBrush(QColor(0, 255, 65)))   # Hacker green
+                else:
+                    cpu_item.setForeground(QBrush(QColor(100, 100, 100)))  # Gray
+
+            # Update stack cell
+            stack_item = self.table.item(row, 2)
+            if stack_item:
+                if stack_used > 0:
+                    stack_item.setText(f"{stack_used}")
+                else:
+                    stack_item.setText("--")
+
+                # Color based on stack usage (assuming ~1KB stacks typical)
+                if stack_used > 800:
+                    stack_item.setForeground(QBrush(QColor(255, 80, 80)))  # Red
+                elif stack_used > 500:
+                    stack_item.setForeground(QBrush(QColor(255, 180, 0)))  # Yellow
+                elif stack_used > 0:
+                    stack_item.setForeground(QBrush(QColor(200, 200, 200)))  # Normal
+                else:
+                    stack_item.setForeground(QBrush(QColor(100, 100, 100)))  # Gray

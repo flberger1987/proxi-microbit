@@ -38,6 +38,8 @@ enum autonav_state {
 /* Heading control - PI controller with anti-windup for continuous correction */
 #define HEADING_KP               0.5f  /* Proportional gain (reduced from 1.0 for smoother response) */
 #define HEADING_KI               0.05f /* Integral gain (eliminates steady-state error) */
+#define HEADING_KD               0.1f  /* Derivative gain (damps oscillations) */
+#define HEADING_D_MAX            5.0f  /* Maximum D term contribution (°/s) */
 #define HEADING_I_MAX            5.0f  /* Integral windup limit (°/s contribution) */
 #define HEADING_TOLERANCE        2.0f  /* Target reached when error < this (degrees) */
 #define AUTONAV_YAW_RATE_MAX    12.0f  /* Maximum yaw rate for autonomous nav (°/s) - reduced for stability */
@@ -119,5 +121,36 @@ void autonav_turn_relative(int16_t degrees);
  * @return Target heading in degrees (0-360), or -1 if not in heading-hold mode
  */
 float autonav_get_target_heading(void);
+
+/**
+ * Set heading controller PID parameters (runtime tuning)
+ *
+ * @param kp Proportional gain
+ * @param ki Integral gain
+ * @param kd Derivative gain
+ * @param i_max Integral windup limit
+ * @param d_max Derivative term limit
+ * @param yaw_max Maximum yaw rate command
+ */
+void autonav_set_pid_params(float kp, float ki, float kd, float i_max, float d_max, float yaw_max);
+
+/**
+ * Get current heading controller PID parameters
+ *
+ * @param kp Output: Proportional gain (may be NULL)
+ * @param ki Output: Integral gain (may be NULL)
+ * @param kd Output: Derivative gain (may be NULL)
+ * @param i_max Output: Integral windup limit (may be NULL)
+ * @param d_max Output: Derivative term limit (may be NULL)
+ * @param yaw_max Output: Maximum yaw rate command (may be NULL)
+ */
+void autonav_get_pid_params(float *kp, float *ki, float *kd, float *i_max, float *d_max, float *yaw_max);
+
+/**
+ * Save PID parameters to flash
+ *
+ * @return 0 on success, negative error code on failure
+ */
+int autonav_save_pid_params(void);
 
 #endif /* AUTONOMOUS_NAV_H */

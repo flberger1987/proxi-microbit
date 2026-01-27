@@ -12,6 +12,9 @@ from .yaw_rate import YawRateWidget
 from .orientation import OrientationWidget
 from .status_panel import StatusPanelWidget
 from .thread_stats import ThreadStatsWidget
+from .log_analysis import LogAnalysisWidget
+from .variance_display import VarianceDisplayWidget
+from .pid_tuning import PIDTuningWidget
 
 __all__ = [
     'CompassWidget',
@@ -22,4 +25,7 @@ __all__ = [
     'OrientationWidget',
     'StatusPanelWidget',
     'ThreadStatsWidget',
+    'LogAnalysisWidget',
+    'VarianceDisplayWidget',
+    'PIDTuningWidget',
 ]

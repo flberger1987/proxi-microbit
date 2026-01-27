@@ -108,6 +108,7 @@ class BLEReceiver(QObject):
     # Signals
     packet_received = pyqtSignal(dict)          # Main telemetry packet
     thread_stats_received = pyqtSignal(dict)    # Thread stats packet
+    text_received = pyqtSignal(str)             # Text response (PID:, CAL:, etc.)
     connection_changed = pyqtSignal(bool, str)  # connected, device_name
     scan_progress = pyqtSignal(str)             # status message
     error_occurred = pyqtSignal(str)            # error message
@@ -130,12 +131,113 @@ class BLEReceiver(QObject):
         self._last_device_address: Optional[str] = None
 
     def _handle_notification(self, sender, data: bytes):
-        """Handle incoming BLE notification."""
+        """Handle incoming BLE notification.
+
+        Parser strategy:
+        1. Text responses always end with \r\n - only emit complete lines
+        2. Binary packets have magic bytes and fixed sizes
+        3. Priority: complete text line > binary packet
+        4. Buffer incomplete data until more arrives
+        """
+        # Debug: show raw data if it looks like text
+        if data and data[0] != TELEMETRY_MAGIC and data[0] != THREAD_STATS_MAGIC:
+            try:
+                text_preview = data.decode('utf-8', errors='replace')[:50]
+                print(f"[BLE DEBUG] Raw text data: {repr(text_preview)}")
+            except:
+                pass
+
         self.buffer.extend(data)
 
-        # Process packets - look for magic bytes
-        while len(self.buffer) >= THREAD_STATS_SIZE:  # Minimum packet size
-            # Find any magic byte
+        # Process buffer until nothing more can be extracted
+        while len(self.buffer) > 0:
+            # First priority: check for complete text line (ends with newline)
+            newline_idx = -1
+            if b'\r\n' in self.buffer:
+                newline_idx = self.buffer.index(b'\r\n')
+            elif b'\n' in self.buffer:
+                newline_idx = self.buffer.index(b'\n')
+
+            if newline_idx >= 0:
+                # Check if there's binary data BEFORE the newline
+                # This could happen if binary packet is followed by text response
+                magic_ab_before = -1
+                magic_ac_before = -1
+                try:
+                    idx = self.buffer.index(TELEMETRY_MAGIC)
+                    if idx < newline_idx:
+                        magic_ab_before = idx
+                except ValueError:
+                    pass
+                try:
+                    idx = self.buffer.index(THREAD_STATS_MAGIC)
+                    if idx < newline_idx:
+                        magic_ac_before = idx
+                except ValueError:
+                    pass
+
+                # Process binary packet first if it's before the text
+                if magic_ab_before >= 0 and (magic_ac_before < 0 or magic_ab_before <= magic_ac_before):
+                    # Telemetry packet before text
+                    if magic_ab_before > 0:
+                        # Discard garbage before magic
+                        del self.buffer[:magic_ab_before]
+                    if len(self.buffer) >= TELEMETRY_SIZE:
+                        packet_data = bytes(self.buffer[:TELEMETRY_SIZE])
+                        del self.buffer[:TELEMETRY_SIZE]
+                        pkt = parse_telemetry(packet_data)
+                        if pkt:
+                            self.packet_count += 1
+                            if self.last_timestamp > 0:
+                                dt = pkt['timestamp_ms'] - self.last_timestamp
+                                if dt > 0:
+                                    self.current_rate = 1000.0 / dt
+                            self.last_timestamp = pkt['timestamp_ms']
+                            pkt['rate_hz'] = self.current_rate
+                            pkt['packet_count'] = self.packet_count
+                            self.packet_received.emit(pkt)
+                        continue
+                    else:
+                        break  # Need more data for complete packet
+
+                if magic_ac_before >= 0 and (magic_ab_before < 0 or magic_ac_before < magic_ab_before):
+                    # Thread stats packet before text
+                    if magic_ac_before > 0:
+                        del self.buffer[:magic_ac_before]
+                    if len(self.buffer) >= THREAD_STATS_SIZE:
+                        packet_data = bytes(self.buffer[:THREAD_STATS_SIZE])
+                        del self.buffer[:THREAD_STATS_SIZE]
+                        pkt = parse_thread_stats(packet_data)
+                        if pkt:
+                            self.thread_stats_received.emit(pkt)
+                        continue
+                    else:
+                        break
+
+                # No binary before text - extract the complete text line
+                # Recalculate newline position after potential buffer modifications
+                if b'\r\n' in self.buffer:
+                    newline_idx = self.buffer.index(b'\r\n')
+                    line_end = newline_idx + 2
+                elif b'\n' in self.buffer:
+                    newline_idx = self.buffer.index(b'\n')
+                    line_end = newline_idx + 1
+                else:
+                    break  # Newline was consumed by binary processing
+
+                line_data = bytes(self.buffer[:newline_idx])
+                del self.buffer[:line_end]
+
+                try:
+                    text = line_data.decode('utf-8').strip()
+                    if text:
+                        print(f"[BLE] Text received: {text}")
+                        self.text_received.emit(text)
+                except UnicodeDecodeError:
+                    pass
+                continue
+
+            # No complete text line - look for binary packets
             magic_ab = -1
             magic_ac = -1
             try:
@@ -147,55 +249,60 @@ class BLEReceiver(QObject):
             except ValueError:
                 pass
 
-            # No magic bytes found
+            # No markers found
             if magic_ab < 0 and magic_ac < 0:
-                self.buffer.clear()
+                # Keep buffer (might be incomplete text response waiting for \n)
+                # But don't let it grow too large
+                if len(self.buffer) > 256:
+                    # Try to decode as text before discarding
+                    try:
+                        text = self.buffer.decode('utf-8').strip()
+                        if text and any(text.startswith(p) for p in ['PID:', 'CAL:', 'VER:', 'IMU:', 'TELE:', 'ERR:', 'CMD:']):
+                            print(f"[BLE] Text (no newline, buffer overflow): {text}")
+                            self.text_received.emit(text)
+                    except UnicodeDecodeError:
+                        pass
+                    self.buffer.clear()
                 break
 
-            # Find earliest magic byte
+            # Process the first binary marker found
             if magic_ab >= 0 and (magic_ac < 0 or magic_ab <= magic_ac):
-                # Telemetry packet (0xAB)
+                # Telemetry packet
                 if magic_ab > 0:
                     del self.buffer[:magic_ab]
-
-                if len(self.buffer) < TELEMETRY_SIZE:
+                if len(self.buffer) >= TELEMETRY_SIZE:
+                    packet_data = bytes(self.buffer[:TELEMETRY_SIZE])
+                    del self.buffer[:TELEMETRY_SIZE]
+                    pkt = parse_telemetry(packet_data)
+                    if pkt:
+                        self.packet_count += 1
+                        if self.last_timestamp > 0:
+                            dt = pkt['timestamp_ms'] - self.last_timestamp
+                            if dt > 0:
+                                self.current_rate = 1000.0 / dt
+                        self.last_timestamp = pkt['timestamp_ms']
+                        pkt['rate_hz'] = self.current_rate
+                        pkt['packet_count'] = self.packet_count
+                        self.packet_received.emit(pkt)
+                    continue
+                else:
                     break
 
-                packet_data = bytes(self.buffer[:TELEMETRY_SIZE])
-                del self.buffer[:TELEMETRY_SIZE]
-
-                pkt = parse_telemetry(packet_data)
-                if pkt:
-                    self.packet_count += 1
-
-                    # Calculate rate
-                    if self.last_timestamp > 0:
-                        dt = pkt['timestamp_ms'] - self.last_timestamp
-                        if dt > 0:
-                            self.current_rate = 1000.0 / dt
-                    self.last_timestamp = pkt['timestamp_ms']
-
-                    # Add rate to packet
-                    pkt['rate_hz'] = self.current_rate
-                    pkt['packet_count'] = self.packet_count
-
-                    # Emit signal
-                    self.packet_received.emit(pkt)
-
-            else:
-                # Thread stats packet (0xAC)
+            if magic_ac >= 0:
+                # Thread stats packet
                 if magic_ac > 0:
                     del self.buffer[:magic_ac]
-
-                if len(self.buffer) < THREAD_STATS_SIZE:
+                if len(self.buffer) >= THREAD_STATS_SIZE:
+                    packet_data = bytes(self.buffer[:THREAD_STATS_SIZE])
+                    del self.buffer[:THREAD_STATS_SIZE]
+                    pkt = parse_thread_stats(packet_data)
+                    if pkt:
+                        self.thread_stats_received.emit(pkt)
+                    continue
+                else:
                     break
 
-                packet_data = bytes(self.buffer[:THREAD_STATS_SIZE])
-                del self.buffer[:THREAD_STATS_SIZE]
-
-                pkt = parse_thread_stats(packet_data)
-                if pkt:
-                    self.thread_stats_received.emit(pkt)
+            break
 
     async def _find_robot(self) -> Optional[object]:
         """Scan for the robot."""
@@ -299,3 +406,23 @@ class BLEReceiver(QObject):
                 await self.client.disconnect()
             except Exception:
                 pass
+
+    async def send_command(self, command: str):
+        """Send a command to the robot via BLE."""
+        if not self.client or not self.client.is_connected:
+            self.error_occurred.emit("Not connected - cannot send command")
+            return False
+
+        try:
+            # Add newline if not present
+            if not command.endswith('\n'):
+                command += '\n'
+            cmd_bytes = command.encode('utf-8')
+            print(f"[BLE DEBUG] Sending {len(cmd_bytes)} bytes: {repr(command)}")
+            await self.client.write_gatt_char(NUS_RX_UUID, cmd_bytes)
+            self.scan_progress.emit(f"Sent: {command.strip()}")
+            return True
+        except Exception as e:
+            self.error_occurred.emit(f"Failed to send command: {e}")
+            print(f"[BLE DEBUG] Send error: {e}")
+            return False

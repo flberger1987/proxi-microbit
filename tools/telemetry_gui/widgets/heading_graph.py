@@ -36,25 +36,30 @@ class HeadingGraphWidget(QWidget):
         # Configure pyqtgraph for dark theme
         pg.setConfigOptions(antialias=True)
 
-        # Create plot widget
+        # Create plot widget with dark background
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground(QColor(30, 30, 30))
-        self.plot_widget.setTitle("Heading", color='w', size='10pt')
+        self.plot_widget.setBackground(QColor(13, 13, 13))  # #0d0d0d
+        self.plot_widget.setTitle("Heading", color='#aaaaaa', size='10pt')
 
-        # Configure axes
-        self.plot_widget.setLabel('left', 'Degrees', color='w')
-        self.plot_widget.setLabel('bottom', 'Time (s)', color='w')
+        # Configure axes with gray text
+        axis_pen = pg.mkPen(color='#888888')
+        self.plot_widget.getAxis('left').setPen(axis_pen)
+        self.plot_widget.getAxis('left').setTextPen(pg.mkPen(color='#aaaaaa'))
+        self.plot_widget.getAxis('bottom').setPen(axis_pen)
+        self.plot_widget.getAxis('bottom').setTextPen(pg.mkPen(color='#aaaaaa'))
+        self.plot_widget.setLabel('left', 'Degrees', color='#aaaaaa')
+        self.plot_widget.setLabel('bottom', 'Time (s)', color='#aaaaaa')
         self.plot_widget.setYRange(0, 360)
         self.plot_widget.setXRange(-self.history_seconds, 0)
 
         # Grid
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
 
-        # Heading line
+        # Heading line - hacker green
         self.heading_line = self.plot_widget.plot(
             self.time_data,
             self.heading_data,
-            pen=pg.mkPen(color=(0, 180, 255), width=2),
+            pen=pg.mkPen(color=(0, 255, 65), width=2),  # Hacker green
             name='Heading'
         )
 

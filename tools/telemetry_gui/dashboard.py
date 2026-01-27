@@ -11,7 +11,8 @@ from typing import Optional
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QGroupBox, QLabel, QStatusBar, QPushButton
+    QGridLayout, QGroupBox, QLabel, QStatusBar, QPushButton,
+    QTabWidget
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
@@ -24,7 +25,10 @@ from .widgets import (
     YawRateWidget,
     OrientationWidget,
     StatusPanelWidget,
-    ThreadStatsWidget
+    ThreadStatsWidget,
+    LogAnalysisWidget,
+    VarianceDisplayWidget,
+    PIDTuningWidget
 )
 from .ble_bridge import BLEReceiver
 
@@ -37,7 +41,8 @@ class TelemetryLogger:
         "timestamp_ms,roll,pitch,heading,target_heading,yaw_rate,"
         "ir_left_mm,ir_right_mm,motor_linear,motor_angular,"
         "nav_state,autonav_enabled,motors_enabled,"
-        "raw_ax,raw_ay,raw_az,raw_mx,raw_my,raw_mz\n"
+        "raw_ax,raw_ay,raw_az,raw_mx,raw_my,raw_mz,"
+        "pid_kp,pid_ki,pid_kd,pid_imax,pid_dmax,pid_ymax\n"
     )
 
     def __init__(self):
@@ -45,6 +50,11 @@ class TelemetryLogger:
         self.filename = None
         self.is_logging = False
         self.packet_count = 0
+        self.pid_params = {'kp': 0.5, 'ki': 0.05, 'kd': 0.1, 'i_max': 5.0, 'd_max': 5.0, 'yaw_max': 12.0}
+
+    def set_pid_params(self, params: dict):
+        """Update PID parameters for logging."""
+        self.pid_params = params.copy()
 
     def start(self) -> str:
         """Start logging to a new timestamped CSV file.
@@ -89,6 +99,7 @@ class TelemetryLogger:
         raw_mag = pkt.get('raw_mag', (0, 0, 0))
 
         # Format the CSV line
+        pid = self.pid_params
         line = (
             f"{pkt.get('timestamp_ms', 0)},"
             f"{pkt.get('roll', 0):.1f},{pkt.get('pitch', 0):.1f},"
@@ -100,7 +111,9 @@ class TelemetryLogger:
             f"{int(pkt.get('autonav_enabled', False))},"
             f"{int(pkt.get('motors_enabled', False))},"
             f"{raw_accel[0]},{raw_accel[1]},{raw_accel[2]},"
-            f"{raw_mag[0]},{raw_mag[1]},{raw_mag[2]}\n"
+            f"{raw_mag[0]},{raw_mag[1]},{raw_mag[2]},"
+            f"{pid.get('kp', 0):.2f},{pid.get('ki', 0):.3f},{pid.get('kd', 0):.2f},"
+            f"{pid.get('i_max', 0):.1f},{pid.get('d_max', 0):.1f},{pid.get('yaw_max', 0):.1f}\n"
         )
         self.file.write(line)
         self.packet_count += 1
@@ -110,17 +123,21 @@ class TelemetryLogger:
             self.file.flush()
 
 
+# Hacker Green accent color
+ACCENT_COLOR = "#00ff41"  # Matrix green
+ACCENT_DARK = "#00cc33"   # Dimmed green
+
 # Dark theme stylesheet
 DARK_STYLESHEET = """
 QMainWindow {
-    background-color: #1e1e1e;
+    background-color: #0d0d0d;
 }
 QWidget {
-    background-color: #1e1e1e;
+    background-color: #0d0d0d;
     color: #cccccc;
 }
 QGroupBox {
-    border: 1px solid #3c3c3c;
+    border: 1px solid #2a2a2a;
     border-radius: 5px;
     margin-top: 10px;
     padding-top: 10px;
@@ -130,12 +147,12 @@ QGroupBox::title {
     subcontrol-origin: margin;
     left: 10px;
     padding: 0 5px;
-    color: #00b4ff;
+    color: #00ff41;
 }
 QStatusBar {
-    background-color: #252526;
+    background-color: #0a0a0a;
     color: #cccccc;
-    border-top: 1px solid #3c3c3c;
+    border-top: 1px solid #2a2a2a;
 }
 QLabel {
     color: #cccccc;
@@ -159,6 +176,33 @@ QPushButton#recordButton:checked {
 }
 QPushButton#recordButton:checked:hover {
     background-color: #a00000;
+}
+QTabWidget::pane {
+    border: 1px solid #2a2a2a;
+    border-radius: 5px;
+    background-color: #0d0d0d;
+}
+QTabWidget::tab-bar {
+    left: 0px;
+}
+QTabBar::tab {
+    background-color: #1a1a1a;
+    color: #666666;
+    border: 1px solid #2a2a2a;
+    border-bottom: none;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
+    padding: 8px 20px;
+    margin-right: 2px;
+}
+QTabBar::tab:selected {
+    background-color: #0d0d0d;
+    color: #00ff41;
+    border-bottom: 2px solid #00ff41;
+}
+QTabBar::tab:hover:!selected {
+    background-color: #2a2a2a;
+    color: #cccccc;
 }
 """
 
@@ -202,9 +246,46 @@ class TelemetryDashboard(QMainWindow):
         header = self._create_header()
         main_layout.addWidget(header)
 
-        # Content area
-        content = QWidget()
+        # Tab container with overlay for controls
+        tab_container = QWidget()
+        tab_container_layout = QVBoxLayout(tab_container)
+        tab_container_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Tab widget (full width)
+        self.tab_widget = QTabWidget()
+        tab_container_layout.addWidget(self.tab_widget)
+
+        # Overlay for record button - positioned absolutely
+        self.controls_overlay = QWidget(tab_container)
+        controls_layout = QHBoxLayout(self.controls_overlay)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Record button
+        self.record_button = QPushButton("● REC")
+        self.record_button.setObjectName("recordButton")
+        self.record_button.setCheckable(True)
+        self.record_button.setFixedWidth(80)
+        self.record_button.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.record_button.clicked.connect(self._on_record_toggle)
+        controls_layout.addWidget(self.record_button)
+
+        self.controls_overlay.adjustSize()
+        self.tab_container = tab_container
+
+        main_layout.addWidget(tab_container, 1)
+
+        # Tab 1: Live Telemetry
+        live_tab = QWidget()
+        self.tab_widget.addTab(live_tab, "📡 Live Telemetry")
+
+        # Tab 2: Log Analysis
+        self.log_analysis = LogAnalysisWidget()
+        self.tab_widget.addTab(self.log_analysis, "📊 Log Analysis")
+
+        # Content area for live telemetry
+        content = live_tab
         content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(0, 10, 0, 0)
         content_layout.setSpacing(10)
 
         # Left column (compass + IR sensors + motors)
@@ -292,12 +373,41 @@ class TelemetryDashboard(QMainWindow):
 
         content_layout.addLayout(right_col, 2)
 
-        main_layout.addWidget(content, 1)
+        # Far right column (Variance + PID Tuning)
+        tuning_col = QVBoxLayout()
+        tuning_col.setSpacing(10)
+
+        # Heading Variance Display
+        variance_group = QGroupBox("Heading σ")
+        variance_layout = QVBoxLayout(variance_group)
+        self.variance_display = VarianceDisplayWidget()
+        variance_layout.addWidget(self.variance_display)
+        tuning_col.addWidget(variance_group)
+
+        # PID Tuning Panel
+        pid_group = QGroupBox("PID Tuning")
+        pid_layout = QVBoxLayout(pid_group)
+        self.pid_tuning = PIDTuningWidget()
+        self.pid_tuning.send_parameters.connect(self._on_send_pid)
+        pid_layout.addWidget(self.pid_tuning)
+        tuning_col.addWidget(pid_group)
+
+        # Initialize logger with default PID params
+        self.logger.set_pid_params(self.pid_tuning.get_parameters())
+
+        tuning_col.addStretch()
+        content_layout.addLayout(tuning_col, 0)  # Minimum width
 
         # Status bar
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
         self.statusbar.showMessage("Disconnected - Starting scan...")
+
+        # Rate label in status bar (right side)
+        self.rate_label = QLabel("0.0 Hz")
+        self.rate_label.setFont(QFont("Monospace", 10))
+        self.rate_label.setStyleSheet("color: #888888;")
+        self.statusbar.addPermanentWidget(self.rate_label)
 
     def _create_header(self) -> QWidget:
         """Create the header widget."""
@@ -308,41 +418,23 @@ class TelemetryDashboard(QMainWindow):
         # Title
         title = QLabel("Kosmos Proxi Telemetry Dashboard")
         title.setFont(QFont("Monospace", 14, QFont.Weight.Bold))
-        title.setStyleSheet("color: #00b4ff;")
+        title.setStyleSheet("color: #00ff41;")
         layout.addWidget(title)
 
-        layout.addStretch()
-
-        # Record button
-        self.record_button = QPushButton("● REC")
-        self.record_button.setObjectName("recordButton")
-        self.record_button.setCheckable(True)
-        self.record_button.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
-        self.record_button.clicked.connect(self._on_record_toggle)
-        layout.addWidget(self.record_button)
-
-        # Record status label
-        self.record_label = QLabel("")
-        self.record_label.setFont(QFont("Monospace", 9))
-        self.record_label.setStyleSheet("color: #888888; margin-left: 10px;")
-        layout.addWidget(self.record_label)
-
-        # Spacer
-        spacer = QLabel("")
-        spacer.setFixedWidth(20)
-        layout.addWidget(spacer)
-
-        # Connection status
+        # Connection status (after title)
         self.conn_label = QLabel("Disconnected")
         self.conn_label.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
-        self.conn_label.setStyleSheet("color: #ff6666;")
+        self.conn_label.setStyleSheet("color: #ff6666; margin-left: 20px;")
         layout.addWidget(self.conn_label)
 
-        # Rate
-        self.rate_label = QLabel("0.0 Hz")
-        self.rate_label.setFont(QFont("Monospace", 10))
-        self.rate_label.setStyleSheet("color: #888888; margin-left: 20px;")
-        layout.addWidget(self.rate_label)
+        # Record status label (after connection)
+        self.record_label = QLabel("")
+        self.record_label.setFont(QFont("Monospace", 9))
+        self.record_label.setStyleSheet("color: #888888; margin-left: 15px;")
+        layout.addWidget(self.record_label)
+
+        # Stretch to fill remaining space
+        layout.addStretch()
 
         return header
 
@@ -367,9 +459,13 @@ class TelemetryDashboard(QMainWindow):
         """Connect BLE receiver signals to widget updates."""
         self.ble_receiver.packet_received.connect(self._on_packet)
         self.ble_receiver.thread_stats_received.connect(self._on_thread_stats)
+        self.ble_receiver.text_received.connect(self._on_text_received)
         self.ble_receiver.connection_changed.connect(self._on_connection_changed)
         self.ble_receiver.scan_progress.connect(self._on_scan_progress)
         self.ble_receiver.error_occurred.connect(self._on_error)
+
+        # PID verification state
+        self._pending_pid_params = None
 
     def _on_packet(self, pkt: dict):
         """Handle incoming telemetry packet."""
@@ -389,6 +485,9 @@ class TelemetryDashboard(QMainWindow):
 
         # Update heading graph
         self.heading_graph.add_sample(pkt['heading'], pkt['target_heading'])
+
+        # Update variance display
+        self.variance_display.add_sample(pkt['heading'], pkt['target_heading'])
 
         # Update IR sensors
         self.ir_sensors.update_distances(pkt['ir_left_mm'], pkt['ir_right_mm'])
@@ -414,11 +513,11 @@ class TelemetryDashboard(QMainWindow):
         self.last_rate = pkt['rate_hz']
         self.rate_label.setText(f"{pkt['rate_hz']:.1f} Hz")
         if pkt['rate_hz'] > 15:
-            self.rate_label.setStyleSheet("color: #00cc66; margin-left: 20px;")
+            self.rate_label.setStyleSheet("color: #00cc66;")
         elif pkt['rate_hz'] > 5:
-            self.rate_label.setStyleSheet("color: #ffaa00; margin-left: 20px;")
+            self.rate_label.setStyleSheet("color: #ffaa00;")
         else:
-            self.rate_label.setStyleSheet("color: #888888; margin-left: 20px;")
+            self.rate_label.setStyleSheet("color: #888888;")
 
     def _on_thread_stats(self, pkt: dict):
         """Handle incoming thread stats packet."""
@@ -450,6 +549,109 @@ class TelemetryDashboard(QMainWindow):
         self.statusbar.showMessage(f"Error: {message}")
         self.conn_label.setText("Error")
         self.conn_label.setStyleSheet("color: #ff6666;")
+
+    def _on_text_received(self, text: str):
+        """Handle text response from robot."""
+        # Parse PID response: PID:KP=0.50,KI=0.050,KD=0.10,IMAX=5.0,DMAX=5.0,YMAX=12.0
+        if text.startswith("PID:"):
+            params = {}
+            try:
+                for part in text[4:].split(","):
+                    if "=" in part:
+                        key, val = part.split("=", 1)
+                        key = key.strip().lower()
+                        val = float(val.strip())
+                        if key == "kp":
+                            params['kp'] = val
+                        elif key == "ki":
+                            params['ki'] = val
+                        elif key == "kd":
+                            params['kd'] = val
+                        elif key == "imax":
+                            params['i_max'] = val
+                        elif key == "dmax":
+                            params['d_max'] = val
+                        elif key == "ymax":
+                            params['yaw_max'] = val
+            except (ValueError, IndexError):
+                pass
+
+            # Verify against pending parameters
+            if self._pending_pid_params and params:
+                sent = self._pending_pid_params
+                # Check if values match (within tolerance)
+                match = (
+                    abs(params.get('kp', -1) - sent['kp']) < 0.01 and
+                    abs(params.get('ki', -1) - sent['ki']) < 0.001 and
+                    abs(params.get('kd', -1) - sent['kd']) < 0.01 and
+                    abs(params.get('i_max', -1) - sent['i_max']) < 0.1 and
+                    abs(params.get('d_max', -1) - sent['d_max']) < 0.1 and
+                    abs(params.get('yaw_max', -1) - sent['yaw_max']) < 0.1
+                )
+
+                self._pending_pid_params = None
+                self.pid_tuning.set_sending(False)
+
+                if match:
+                    self.pid_tuning.set_status("OK - Values applied", is_error=False)
+                    self.statusbar.showMessage("PID parameters applied successfully")
+                else:
+                    self.pid_tuning.set_status("Mismatch!", is_error=True)
+                    self.statusbar.showMessage("Warning: PID values don't match!")
+
+    def _on_send_pid(self, params: dict):
+        """Send PID parameters to robot via BLE."""
+        # Check if connected
+        if not self.ble_receiver.client or not self.ble_receiver.client.is_connected:
+            self.statusbar.showMessage("Error: Not connected to robot!")
+            self.pid_tuning.set_status("Not connected!", is_error=True)
+            return
+
+        # Update logger with new PID params
+        self.logger.set_pid_params(params)
+
+        # Set sending state
+        self.pid_tuning.set_sending(True)
+        self._pending_pid_params = params
+
+        # Format: PID:KP=0.50,KI=0.050,KD=0.10,IMAX=5.0,DMAX=5.0,YMAX=12.0
+        cmd = f"PID:KP={params['kp']:.2f},KI={params['ki']:.3f},KD={params['kd']:.2f},IMAX={params['i_max']:.1f},DMAX={params['d_max']:.1f},YMAX={params['yaw_max']:.1f}"
+        asyncio.ensure_future(self.ble_receiver.send_command(cmd))
+        self.statusbar.showMessage(f"Sending: {cmd}")
+
+        # Start timeout timer (3 seconds)
+        QTimer.singleShot(3000, self._pid_send_timeout)
+
+    def _pid_send_timeout(self):
+        """Handle PID send timeout."""
+        if self._pending_pid_params is not None:
+            # No response received
+            self._pending_pid_params = None
+            self.pid_tuning.set_sending(False)
+            self.pid_tuning.set_status("Timeout - no response", is_error=True)
+            self.statusbar.showMessage("PID send timeout - no response from robot")
+
+    def _position_controls_overlay(self):
+        """Position the controls overlay in top-right of tab container."""
+        if hasattr(self, 'controls_overlay') and hasattr(self, 'tab_container'):
+            # Just the record button (80px)
+            overlay_width = 85
+            container_width = self.tab_container.width()
+            # Position at top-right, aligned with tab bar
+            self.controls_overlay.setFixedWidth(overlay_width)
+            self.controls_overlay.move(container_width - overlay_width - 10, 3)
+            self.controls_overlay.raise_()
+
+    def resizeEvent(self, event):
+        """Handle window resize."""
+        super().resizeEvent(event)
+        self._position_controls_overlay()
+
+    def showEvent(self, event):
+        """Handle window show."""
+        super().showEvent(event)
+        # Position overlay after window is shown
+        QTimer.singleShot(0, self._position_controls_overlay)
 
     def closeEvent(self, event):
         """Handle window close."""

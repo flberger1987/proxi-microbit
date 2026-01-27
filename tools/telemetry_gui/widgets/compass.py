@@ -22,12 +22,12 @@ class CompassWidget(QWidget):
 
         self.setMinimumSize(180, 220)
 
-        # Colors (dark theme)
-        self.bg_color = QColor(30, 30, 30)
-        self.ring_color = QColor(60, 60, 60)
+        # Colors (dark theme - hacker green)
+        self.bg_color = QColor(13, 13, 13)
+        self.ring_color = QColor(42, 42, 42)
         self.tick_color = QColor(150, 150, 150)
         self.text_color = QColor(200, 200, 200)
-        self.needle_color = QColor(0, 180, 255)
+        self.needle_color = QColor(0, 255, 65)  # Hacker green
         self.target_color = QColor(255, 80, 80)
         self.north_color = QColor(255, 100, 100)
 
@@ -128,8 +128,8 @@ class CompassWidget(QWidget):
         nx = cx + needle_length * math.cos(heading_rad)
         ny = cy + needle_length * math.sin(heading_rad)
 
-        # Needle base (triangle)
-        base_width = 8
+        # Needle base (triangle) - thinner
+        base_width = 5
         base_rad1 = heading_rad + math.pi / 2
         base_rad2 = heading_rad - math.pi / 2
 
@@ -138,9 +138,10 @@ class CompassWidget(QWidget):
         bx2 = cx + base_width * math.cos(base_rad2)
         by2 = cy + base_width * math.sin(base_rad2)
 
-        # Draw needle
-        painter.setPen(QPen(self.needle_color, 2))
-        painter.setBrush(QBrush(self.needle_color))
+        # Draw needle (semi-transparent, thinner)
+        needle_color_alpha = QColor(0, 255, 65, 180)  # ~70% opacity
+        painter.setPen(QPen(needle_color_alpha, 1))
+        painter.setBrush(QBrush(needle_color_alpha))
         from PyQt6.QtGui import QPolygonF
         needle = QPolygonF([
             QPointF(nx, ny),

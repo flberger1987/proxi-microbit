@@ -20,6 +20,11 @@ check_deps() {
 
 check_deps
 
+# Kill any existing dashboard instances
+pkill -f "telemetry_receiver.py --gui" 2>/dev/null
+pkill -f "telemetry_gui" 2>/dev/null
+sleep 0.5
+
 # Run the telemetry receiver in GUI mode
 cd "$SCRIPT_DIR/tools"
 exec python3 telemetry_receiver.py --gui "$@"

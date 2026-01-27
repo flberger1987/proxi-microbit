@@ -47,19 +47,21 @@ class IRSensorWidget(QWidget):
     def _get_bar_color(self, distance_mm: int) -> QColor:
         """Get color based on distance with smooth gradient.
 
-        500mm = green (0, 200, 0)
-        250mm = yellow (255, 200, 0)
-        150mm = red (255, 0, 0)
+        0 or >=500mm = gray (no reading)
+        250-500mm = green (0, 200, 0)
+        150-250mm = yellow (255, 200, 0)
+        <=150mm = red (255, 0, 0)
         """
-        if distance_mm >= self.safe_distance:
-            # Green
-            return QColor(0, 200, 0)
+        if distance_mm == 0 or distance_mm >= self.safe_distance:
+            # Gray - no obstacle detected or no reading
+            return QColor(100, 100, 100)
         elif distance_mm >= self.warning_distance:
             # Green to Yellow (250-500mm)
+            # Closer to 500mm = more green, closer to 250mm = more yellow
             t = (distance_mm - self.warning_distance) / (self.safe_distance - self.warning_distance)
             return QColor(
-                int(255 * (1 - t)),      # 255 -> 0
-                200,                      # constant
+                int(255 * (1 - t)),      # 255 -> 0 (yellow to green)
+                int(100 + 100 * t),      # 100 -> 200 (brighter green)
                 0
             )
         elif distance_mm >= self.critical_distance:

@@ -8,6 +8,9 @@
 #include "smp_bt.h"
 #include "serial_output.h"
 #include "telemetry.h"
+#include "autonomous_nav.h"
+
+#include <stdlib.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
@@ -50,10 +53,11 @@ static void nus_received(struct bt_conn *conn, const void *data, uint16_t len, v
 {
     ARG_UNUSED(ctx);
 
-    char cmd[32];
+    char cmd[80];  /* Increased for PID command with KD/DMAX (~60 bytes) */
 
     /* Safety check */
     if (len == 0 || len >= sizeof(cmd)) {
+        printk("NUS: Command too long (%d bytes, max %zu)\n", len, sizeof(cmd) - 1);
         return;
     }
 
@@ -121,9 +125,60 @@ static void nus_received(struct bt_conn *conn, const void *data, uint16_t len, v
         /* Disable binary telemetry */
         telemetry_enable(false);
         bt_nus_send(conn, "TELE:OFF\r\n", 10);
+    } else if (strncmp(cmd, "PID:", 4) == 0) {
+        /* Parse PID parameters: PID:KP=0.50,KI=0.050,KD=0.10,IMAX=5.0,DMAX=5.0,YMAX=12.0 */
+        float kp, ki, kd, i_max, d_max, yaw_max;
+        autonav_get_pid_params(&kp, &ki, &kd, &i_max, &d_max, &yaw_max);
+
+        char *param = cmd + 4;
+        char *saveptr;
+        char *token = strtok_r(param, ",", &saveptr);
+
+        while (token != NULL) {
+            if (strncmp(token, "KP=", 3) == 0) {
+                kp = strtof(token + 3, NULL);
+            } else if (strncmp(token, "KI=", 3) == 0) {
+                ki = strtof(token + 3, NULL);
+            } else if (strncmp(token, "KD=", 3) == 0) {
+                kd = strtof(token + 3, NULL);
+            } else if (strncmp(token, "IMAX=", 5) == 0) {
+                i_max = strtof(token + 5, NULL);
+            } else if (strncmp(token, "DMAX=", 5) == 0) {
+                d_max = strtof(token + 5, NULL);
+            } else if (strncmp(token, "YMAX=", 5) == 0) {
+                yaw_max = strtof(token + 5, NULL);
+            }
+            token = strtok_r(NULL, ",", &saveptr);
+        }
+
+        autonav_set_pid_params(kp, ki, kd, i_max, d_max, yaw_max);
+
+        char resp[96];
+        int resp_len = snprintf(resp, sizeof(resp),
+            "PID:KP=%.2f,KI=%.3f,KD=%.2f,IMAX=%.1f,DMAX=%.1f,YMAX=%.1f\r\n",
+            (double)kp, (double)ki, (double)kd, (double)i_max, (double)d_max, (double)yaw_max);
+        bt_nus_send(conn, resp, resp_len);
+    } else if (strcmp(cmd, "PIDGET") == 0 || strcmp(cmd, "pidget") == 0) {
+        /* Get current PID parameters */
+        float kp, ki, kd, i_max, d_max, yaw_max;
+        autonav_get_pid_params(&kp, &ki, &kd, &i_max, &d_max, &yaw_max);
+
+        char resp[96];
+        int resp_len = snprintf(resp, sizeof(resp),
+            "PID:KP=%.2f,KI=%.3f,KD=%.2f,IMAX=%.1f,DMAX=%.1f,YMAX=%.1f\r\n",
+            (double)kp, (double)ki, (double)kd, (double)i_max, (double)d_max, (double)yaw_max);
+        bt_nus_send(conn, resp, resp_len);
+    } else if (strcmp(cmd, "PIDSAVE") == 0 || strcmp(cmd, "pidsave") == 0) {
+        /* Save PID parameters to flash */
+        int err = autonav_save_pid_params();
+        if (err == 0) {
+            bt_nus_send(conn, "PID:SAVED\r\n", 11);
+        } else {
+            bt_nus_send(conn, "PID:ERR\r\n", 9);
+        }
     } else if (strcmp(cmd, "HELP") == 0 || strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         /* List available commands */
-        bt_nus_send(conn, "CMD:VER,CAL,IMU,IRD,TELE,HELP\r\n", 31);
+        bt_nus_send(conn, "CMD:VER,CAL,IMU,IRD,TELE,PID,PIDGET,PIDSAVE,HELP\r\n", 50);
     } else {
         /* Unknown command */
         bt_nus_send(conn, "ERR:UNKNOWN\r\n", 13);
