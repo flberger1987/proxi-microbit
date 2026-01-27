@@ -107,4 +107,18 @@ void mahony_get_euler_direct(float ax, float ay, float az,
                              float mx, float my, float mz,
                              float *roll, float *pitch, float *heading);
 
+/**
+ * Compute heading using a reference gravity vector for tilt compensation.
+ *
+ * This function uses a slowly-filtered gravity direction (reference gravity)
+ * to define the stable walking plane, instead of instantaneous accelerometer.
+ * This reduces heading oscillation caused by gait-induced tilt.
+ *
+ * @param ref_gx, ref_gy, ref_gz Reference gravity vector (normalized)
+ * @param mx, my, mz Magnetometer readings (any unit, will be normalized)
+ * @return heading Heading angle in degrees (0-360)
+ */
+float mahony_heading_with_ref_gravity(float ref_gx, float ref_gy, float ref_gz,
+                                      float mx, float my, float mz);
+
 #endif /* MAHONY_FILTER_H */

@@ -5,11 +5,13 @@ PyQt6-based dashboard for visualizing Kosmos Proxi robot telemetry.
 """
 
 import asyncio
+import os
+from datetime import datetime
 from typing import Optional
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QGroupBox, QLabel, QStatusBar
+    QGridLayout, QGroupBox, QLabel, QStatusBar, QPushButton
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
@@ -25,6 +27,87 @@ from .widgets import (
     ThreadStatsWidget
 )
 from .ble_bridge import BLEReceiver
+
+
+class TelemetryLogger:
+    """CSV logger for telemetry data."""
+
+    # CSV header matching the console logger format
+    CSV_HEADER = (
+        "timestamp_ms,roll,pitch,heading,target_heading,yaw_rate,"
+        "ir_left_mm,ir_right_mm,motor_linear,motor_angular,"
+        "nav_state,autonav_enabled,motors_enabled,"
+        "raw_ax,raw_ay,raw_az,raw_mx,raw_my,raw_mz\n"
+    )
+
+    def __init__(self):
+        self.file = None
+        self.filename = None
+        self.is_logging = False
+        self.packet_count = 0
+
+    def start(self) -> str:
+        """Start logging to a new timestamped CSV file.
+
+        Returns:
+            The filename of the created log file.
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.filename = f"{timestamp}_telemetrie.csv"
+        self.file = open(self.filename, 'w')
+        self.file.write(self.CSV_HEADER)
+        self.file.flush()
+        self.is_logging = True
+        self.packet_count = 0
+        return self.filename
+
+    def stop(self) -> int:
+        """Stop logging and close the file.
+
+        Returns:
+            The number of packets logged.
+        """
+        if self.file:
+            self.file.flush()
+            self.file.close()
+            self.file = None
+        self.is_logging = False
+        count = self.packet_count
+        return count
+
+    def log_packet(self, pkt: dict):
+        """Log a single telemetry packet to CSV."""
+        if not self.is_logging or not self.file:
+            return
+
+        # Handle target_heading (None -> -1 for CSV)
+        target = pkt.get('target_heading')
+        target = target if target is not None else -1
+
+        # Get raw sensor data (tuples)
+        raw_accel = pkt.get('raw_accel', (0, 0, 0))
+        raw_mag = pkt.get('raw_mag', (0, 0, 0))
+
+        # Format the CSV line
+        line = (
+            f"{pkt.get('timestamp_ms', 0)},"
+            f"{pkt.get('roll', 0):.1f},{pkt.get('pitch', 0):.1f},"
+            f"{pkt.get('heading', 0):.1f},{target:.1f},"
+            f"{pkt.get('yaw_rate', 0):.1f},"
+            f"{pkt.get('ir_left_mm', 0)},{pkt.get('ir_right_mm', 0)},"
+            f"{pkt.get('motor_linear', 0)},{pkt.get('motor_angular', 0)},"
+            f"{pkt.get('nav_state_name', 'UNKNOWN')},"
+            f"{int(pkt.get('autonav_enabled', False))},"
+            f"{int(pkt.get('motors_enabled', False))},"
+            f"{raw_accel[0]},{raw_accel[1]},{raw_accel[2]},"
+            f"{raw_mag[0]},{raw_mag[1]},{raw_mag[2]}\n"
+        )
+        self.file.write(line)
+        self.packet_count += 1
+
+        # Flush every 20 packets (~1 second at 20Hz)
+        if self.packet_count % 20 == 0:
+            self.file.flush()
 
 
 # Dark theme stylesheet
@@ -57,6 +140,26 @@ QStatusBar {
 QLabel {
     color: #cccccc;
 }
+QPushButton#recordButton {
+    background-color: #3c3c3c;
+    border: 2px solid #555555;
+    border-radius: 5px;
+    padding: 5px 15px;
+    color: #cccccc;
+    font-weight: bold;
+}
+QPushButton#recordButton:hover {
+    background-color: #4a4a4a;
+    border-color: #666666;
+}
+QPushButton#recordButton:checked {
+    background-color: #8b0000;
+    border-color: #ff4444;
+    color: #ffffff;
+}
+QPushButton#recordButton:checked:hover {
+    background-color: #a00000;
+}
 """
 
 
@@ -69,6 +172,9 @@ class TelemetryDashboard(QMainWindow):
         self.ble_receiver = ble_receiver
         self.packet_count = 0
         self.last_rate = 0.0
+
+        # CSV Logger
+        self.logger = TelemetryLogger()
 
         self.setWindowTitle("Kosmos Proxi Telemetry Dashboard")
         self.setMinimumSize(1000, 700)
@@ -207,6 +313,25 @@ class TelemetryDashboard(QMainWindow):
 
         layout.addStretch()
 
+        # Record button
+        self.record_button = QPushButton("● REC")
+        self.record_button.setObjectName("recordButton")
+        self.record_button.setCheckable(True)
+        self.record_button.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.record_button.clicked.connect(self._on_record_toggle)
+        layout.addWidget(self.record_button)
+
+        # Record status label
+        self.record_label = QLabel("")
+        self.record_label.setFont(QFont("Monospace", 9))
+        self.record_label.setStyleSheet("color: #888888; margin-left: 10px;")
+        layout.addWidget(self.record_label)
+
+        # Spacer
+        spacer = QLabel("")
+        spacer.setFixedWidth(20)
+        layout.addWidget(spacer)
+
         # Connection status
         self.conn_label = QLabel("Disconnected")
         self.conn_label.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
@@ -221,6 +346,23 @@ class TelemetryDashboard(QMainWindow):
 
         return header
 
+    def _on_record_toggle(self, checked: bool):
+        """Handle record button toggle."""
+        if checked:
+            # Start recording
+            filename = self.logger.start()
+            self.record_button.setText("■ STOP")
+            self.record_label.setText(f"{filename}")
+            self.record_label.setStyleSheet("color: #ff4444;")
+            self.statusbar.showMessage(f"Recording to {filename}")
+        else:
+            # Stop recording
+            count = self.logger.stop()
+            self.record_button.setText("● REC")
+            self.record_label.setText(f"Saved {count} pkts")
+            self.record_label.setStyleSheet("color: #00cc66;")
+            self.statusbar.showMessage(f"Recording stopped: {count} packets saved")
+
     def _connect_signals(self):
         """Connect BLE receiver signals to widget updates."""
         self.ble_receiver.packet_received.connect(self._on_packet)
@@ -232,6 +374,15 @@ class TelemetryDashboard(QMainWindow):
     def _on_packet(self, pkt: dict):
         """Handle incoming telemetry packet."""
         self.packet_count += 1
+
+        # Log to CSV if recording
+        if self.logger.is_logging:
+            self.logger.log_packet(pkt)
+            # Update record label with packet count
+            if self.logger.packet_count % 20 == 0:  # Update every ~1 second
+                self.record_label.setText(
+                    f"{self.logger.filename} ({self.logger.packet_count})"
+                )
 
         # Update compass
         self.compass.update_heading(pkt['heading'], pkt['target_heading'])
@@ -302,6 +453,11 @@ class TelemetryDashboard(QMainWindow):
 
     def closeEvent(self, event):
         """Handle window close."""
+        # Stop recording if active
+        if self.logger.is_logging:
+            count = self.logger.stop()
+            print(f"Recording stopped on close: {count} packets saved to {self.logger.filename}")
+
         # Signal the BLE receiver to stop
         asyncio.ensure_future(self.ble_receiver.disconnect())
         event.accept()

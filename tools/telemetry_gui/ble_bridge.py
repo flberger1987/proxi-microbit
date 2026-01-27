@@ -260,6 +260,13 @@ class BLEReceiver(QObject):
                 # Start notifications
                 await self.client.start_notify(NUS_TX_UUID, self._handle_notification)
 
+                # Enable telemetry streaming
+                try:
+                    await self.client.write_gatt_char(NUS_RX_UUID, b"TELEON\n")
+                    self.scan_progress.emit("Telemetry enabled")
+                except Exception as e:
+                    self.scan_progress.emit(f"Warning: Could not enable telemetry: {e}")
+
                 # Keep running until disconnected
                 while self._running and self.client.is_connected:
                     await asyncio.sleep(0.1)

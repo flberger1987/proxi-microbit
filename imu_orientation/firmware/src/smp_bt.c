@@ -34,10 +34,19 @@ static const struct bt_data sd[] = {
             sizeof(CONFIG_BT_DEVICE_NAME) - 1),
 };
 
+/* Track if advertising is paused (for Xbox Controller scanning) */
+static volatile bool adv_paused;
+
 /* Restart advertising work handler */
 static void adv_restart_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
+
+    /* Don't restart if advertising is paused (Xbox scan in progress) */
+    if (adv_paused) {
+        printk("BLE: Advertising restart skipped (paused for Xbox scan)\n");
+        return;
+    }
 
     int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
                                sd, ARRAY_SIZE(sd));
@@ -128,10 +137,33 @@ bool smp_bt_is_connected(void)
 
 void smp_bt_pause_advertising(void)
 {
-    /* No-op: Advertising is now always active (permanent) */
+    int err;
+
+    if (adv_paused) {
+        return;
+    }
+
+    /* Cancel any pending restart work */
+    k_work_cancel_delayable(&adv_restart_work);
+
+    err = bt_le_adv_stop();
+    if (err && err != -EALREADY) {
+        printk("BLE: Failed to stop advertising (err %d)\n", err);
+    } else {
+        adv_paused = true;
+        printk("BLE: Advertising paused (for Xbox scan)\n");
+    }
 }
 
 void smp_bt_resume_advertising(void)
 {
-    /* No-op: Advertising is now always active (permanent) */
+    if (!adv_paused) {
+        return;
+    }
+
+    adv_paused = false;
+
+    /* Schedule advertising restart with small delay */
+    k_work_schedule(&adv_restart_work, K_MSEC(100));
+    printk("BLE: Advertising will resume...\n");
 }

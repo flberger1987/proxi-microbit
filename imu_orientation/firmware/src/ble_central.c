@@ -226,6 +226,10 @@ static uint8_t discover_func(struct bt_conn *conn,
                 printk("BLE Central: Subscribed (auto-CCC)!\n");
                 discovery_complete = true;
                 robot_set_state(ROBOT_STATE_CONNECTED);
+
+                /* Resume advertising so Dashboard can reconnect */
+                smp_bt_resume_advertising();
+
                 if (callbacks.connected) {
                     callbacks.connected();
                 }
@@ -300,6 +304,10 @@ static uint8_t discover_func(struct bt_conn *conn,
             if (discovery_complete) {
                 printk("BLE Central: Controller ready!\n");
                 robot_set_state(ROBOT_STATE_CONNECTED);
+
+                /* Resume advertising so Dashboard can reconnect */
+                smp_bt_resume_advertising();
+
                 if (callbacks.connected) {
                     callbacks.connected();
                 }
@@ -354,6 +362,9 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
     if (err) {
         printk("BLE Central: Connection failed (err %u)\n", err);
         controller_conn = NULL;
+
+        /* Resume advertising so Dashboard can reconnect */
+        smp_bt_resume_advertising();
         return;
     }
 
@@ -413,7 +424,8 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
     /* Update robot state */
     robot_set_state(ROBOT_STATE_IDLE);
 
-    /* Advertising continues - no need to resume (multi-role active) */
+    /* Ensure advertising is active so Dashboard can reconnect */
+    smp_bt_resume_advertising();
 
     /* Notify callback */
     if (callbacks.disconnected) {
@@ -537,6 +549,12 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi,
     bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
     printk("BLE Central: Found Xbox Controller at %s (RSSI %d)\n", addr_str, rssi);
 
+    /* Check if already connecting/connected */
+    if (controller_conn != NULL) {
+        printk("BLE Central: Already have connection, ignoring\n");
+        return;
+    }
+
     /* Stop scanning */
     err = bt_le_scan_stop();
     if (err) {
@@ -562,8 +580,15 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi,
     err = bt_conn_le_create(addr, &create_param, &conn_param, &controller_conn);
     if (err) {
         printk("BLE Central: Connection failed to start (err %d)\n", err);
-        /* Try to restart scanning */
-        ble_central_start_scan();
+
+        /* Resume advertising on connection failure */
+        smp_bt_resume_advertising();
+
+        /* Schedule retry after a delay (don't immediately restart scan) */
+        if (bonded_controller_valid) {
+            printk("BLE Central: Will retry in %d ms...\n", RECONNECT_RETRY_MS);
+            k_work_schedule(&reconnect_work, K_MSEC(RECONNECT_RETRY_MS));
+        }
     }
 }
 
@@ -576,7 +601,9 @@ static void scan_timeout_handler(struct k_work *work)
         bt_le_scan_stop();
         is_scanning = false;
         robot_set_state(ROBOT_STATE_IDLE);
-        /* Advertising continues - no need to resume (multi-role active) */
+
+        /* Resume advertising so Dashboard can reconnect */
+        smp_bt_resume_advertising();
 
         /* If we have a bonded controller, schedule another scan attempt
          * This handles the case where the controller was turned off and
@@ -693,8 +720,12 @@ int ble_central_start_scan(void)
         return -EISCONN;
     }
 
-    /* Note: nRF52833 supports multi-role BLE - keep advertising while scanning
-     * so dashboard can connect before/during Xbox pairing */
+    /* Pause advertising to free BLE resources for scanning + connection.
+     * The nRF52833 has limited resources, and running advertising while
+     * also scanning and trying to create a central connection can cause
+     * ENOMEM errors. Dashboard will auto-reconnect when advertising resumes.
+     */
+    smp_bt_pause_advertising();
 
     struct bt_le_scan_param scan_param = {
         .type = BT_LE_SCAN_TYPE_ACTIVE,
@@ -736,6 +767,10 @@ int ble_central_stop_scan(void)
     }
 
     is_scanning = false;
+
+    /* Resume advertising so Dashboard can reconnect */
+    smp_bt_resume_advertising();
+
     printk("BLE Central: Scan stopped\n");
     return 0;
 }

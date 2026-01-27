@@ -19,7 +19,7 @@
 /* PID Controller gains */
 #define YAW_KP 1.0f   /* Proportional gain */
 #define YAW_KI 0.3f   /* Integral gain (low - feedforward does main work) */
-#define YAW_KD 0.8f   /* Derivative gain (damps overshoot) */
+#define YAW_KD 0.3f   /* Derivative gain (reduced from 0.8 - less oscillation) */
 
 /**
  * Initialize the yaw rate controller

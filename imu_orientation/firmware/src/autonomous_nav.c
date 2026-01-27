@@ -49,6 +49,9 @@ static float target_heading;
 static int scan_phase;            /* 0=scanning left (CCW), 1=scanning right (CW) */
 static float scan_origin_heading; /* Heading when scan started */
 
+/* Heading PI controller state */
+static float heading_integral = 0.0f;  /* Integral term for heading error */
+
 /* ============================================================================
  * Helper Functions
  * ============================================================================ */
@@ -148,6 +151,9 @@ static void transition_to(enum autonav_state new_state)
         current_state = new_state;
         state_start_time = k_uptime_get();
 
+        /* Reset heading integral on state change to prevent windup carryover */
+        heading_integral = 0.0f;
+
         /* Don't send motor command for TURNING - process_turning() handles it
          * This prevents the 50ms stop gap that caused Bug #1 */
         if (new_state != AUTONAV_TURNING) {
@@ -211,17 +217,35 @@ static void process_heading_hold(void)
     float current = get_current_heading();
     float heading_error = heading_delta(target_heading, current);
 
-    /* Calculate desired yaw rate from heading error (outer loop)
+    /* Calculate desired yaw rate from heading error (outer loop PI controller)
      * error > 0 means target is CCW from current → need CCW rotation
      * Yaw controller convention: positive = CW, negative = CCW
      * Therefore: negate the error!
      */
     float desired_yaw_rate = 0.0f;
     if (abs_f(heading_error) > HEADING_TOLERANCE) {
-        /* Proportional: 1°/s per degree of error, clamped to max */
-        desired_yaw_rate = -heading_error * HEADING_KP;
+        /* P-term: proportional to error */
+        float p_term = -heading_error * HEADING_KP;
+
+        /* I-term: accumulate error over time (dt = 50ms = 0.05s) */
+        /* Anti-windup: only accumulate if output is not saturated */
+        bool saturated = (abs_f(p_term + heading_integral) >= AUTONAV_YAW_RATE_MAX);
+        if (!saturated) {
+            heading_integral += -heading_error * HEADING_KI * 0.05f;
+            /* Clamp integral to prevent excessive windup */
+            if (heading_integral > HEADING_I_MAX) heading_integral = HEADING_I_MAX;
+            if (heading_integral < -HEADING_I_MAX) heading_integral = -HEADING_I_MAX;
+        }
+
+        /* Combined PI output */
+        desired_yaw_rate = p_term + heading_integral;
+
+        /* Clamp to max yaw rate */
         if (desired_yaw_rate > AUTONAV_YAW_RATE_MAX) desired_yaw_rate = AUTONAV_YAW_RATE_MAX;
         if (desired_yaw_rate < -AUTONAV_YAW_RATE_MAX) desired_yaw_rate = -AUTONAV_YAW_RATE_MAX;
+    } else {
+        /* Within tolerance - slowly decay integral to avoid sudden jumps */
+        heading_integral *= 0.9f;
     }
 
     /* Set target for inner yaw rate controller */

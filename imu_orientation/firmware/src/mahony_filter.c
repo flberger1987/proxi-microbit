@@ -317,3 +317,39 @@ void mahony_reset(struct mahony_filter *filter)
     /* Reset magnetic reference to be recaptured */
     filter->mag_ref_valid = false;
 }
+
+/**
+ * Compute heading using a reference gravity vector for tilt compensation.
+ *
+ * Uses a slowly-filtered gravity direction to define the stable walking plane,
+ * reducing heading oscillation caused by gait-induced tilt (~1.27 Hz).
+ *
+ * The reference gravity should be updated with a slow EMA filter (alpha ~0.05)
+ * to track the true vertical while filtering out gait oscillations.
+ */
+float mahony_heading_with_ref_gravity(float ref_gx, float ref_gy, float ref_gz,
+                                      float mx, float my, float mz)
+{
+    /* Compute roll/pitch from reference gravity (stable walking plane) */
+    float roll = atan2f(ref_gy, ref_gz);
+    float pitch = atan2f(-ref_gx, sqrtf(ref_gy * ref_gy + ref_gz * ref_gz));
+
+    /* Tilt compensation: rotate mag vector to horizontal plane */
+    float cos_roll = cosf(roll);
+    float sin_roll = sinf(roll);
+    float cos_pitch = cosf(pitch);
+    float sin_pitch = sinf(pitch);
+
+    float mx_h = mx * cos_pitch + my * sin_roll * sin_pitch + mz * cos_roll * sin_pitch;
+    float my_h = my * cos_roll - mz * sin_roll;
+
+    /* Heading from horizontal mag components */
+    float heading = atan2f(-my_h, mx_h) * (180.0f / M_PI);
+
+    /* Normalize to 0-360 */
+    if (heading < 0.0f) {
+        heading += 360.0f;
+    }
+
+    return heading;
+}

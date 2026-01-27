@@ -15,6 +15,10 @@
 
 #include <math.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
+
 /* Sensor devices */
 static const struct device *accel_dev;
 static const struct device *magn_dev;
@@ -288,6 +292,23 @@ static volatile struct orientation_data current_orientation;
 /* Current raw sensor values (for telemetry) */
 static volatile int16_t current_raw_ax, current_raw_ay, current_raw_az;
 static volatile int16_t current_raw_mx, current_raw_my, current_raw_mz;
+
+/* ============================================================================
+ * Reference Gravity Vector for Stable Heading
+ *
+ * The hexapod's gait causes roll/pitch oscillations at ~1.27 Hz.
+ * Using instantaneous accelerometer for tilt compensation causes the
+ * computed heading to oscillate ±7°.
+ *
+ * Solution: Use a slowly-filtered gravity direction to define the stable
+ * walking plane. The filter has tau ≈ 2s (alpha=0.05 at 10Hz).
+ * ============================================================================ */
+#define REF_GRAV_ALPHA 0.05f  /* EMA alpha: tau ≈ (1/alpha - 1) * dt ≈ 1.9s */
+
+static float ref_grav_x = 0.0f;
+static float ref_grav_y = 0.0f;
+static float ref_grav_z = 1.0f;  /* Default: gravity along Z (device flat) */
+static bool ref_grav_initialized = false;
 
 float sensors_get_heading(void)
 {
@@ -582,12 +603,63 @@ static void sensor_thread_fn(void *p1, void *p2, void *p3)
             mz_cal *= mag_cal.scale_z;
         }
 
-        /* Calculate orientation directly (tilt-compensated compass)
-         * This works much better than Mahony filter without a gyroscope
+        /* ================================================================
+         * Reference Gravity Update
+         *
+         * Normalize accelerometer to get gravity direction, then apply
+         * slow EMA filter to track the stable walking plane.
+         * This filters out gait-induced tilt oscillations (~1.27 Hz).
+         * ================================================================ */
+        float anorm = sqrtf(ax*ax + ay*ay + az*az);
+        if (anorm > 0.5f) {  /* Valid reading (>0.5g, filters out free-fall) */
+            float gx = ax / anorm;
+            float gy = ay / anorm;
+            float gz = az / anorm;
+
+            if (!ref_grav_initialized) {
+                /* Initialize with first valid reading */
+                ref_grav_x = gx;
+                ref_grav_y = gy;
+                ref_grav_z = gz;
+                ref_grav_initialized = true;
+            } else {
+                /* EMA filter update */
+                ref_grav_x = REF_GRAV_ALPHA * gx + (1.0f - REF_GRAV_ALPHA) * ref_grav_x;
+                ref_grav_y = REF_GRAV_ALPHA * gy + (1.0f - REF_GRAV_ALPHA) * ref_grav_y;
+                ref_grav_z = REF_GRAV_ALPHA * gz + (1.0f - REF_GRAV_ALPHA) * ref_grav_z;
+
+                /* Renormalize to unit vector (drift correction) */
+                float rn = sqrtf(ref_grav_x*ref_grav_x + ref_grav_y*ref_grav_y + ref_grav_z*ref_grav_z);
+                if (rn > 0.001f) {
+                    ref_grav_x /= rn;
+                    ref_grav_y /= rn;
+                    ref_grav_z /= rn;
+                }
+            }
+        }
+
+        /* Calculate orientation:
+         * - Roll/Pitch: from INSTANTANEOUS accelerometer (for telemetry display)
+         * - Heading: from REFERENCE GRAVITY (stable walking plane)
          */
         float roll_raw, pitch_raw, heading_raw;
-        mahony_get_euler_direct(ax, ay, az, mx_cal, my_cal, mz_cal,
-                                &roll_raw, &pitch_raw, &heading_raw);
+
+        /* Roll and Pitch from instantaneous accel (shows actual tilt) */
+        if (anorm > 0.001f) {
+            float ax_n = ax / anorm;
+            float ay_n = ay / anorm;
+            float az_n = az / anorm;
+            roll_raw = atan2f(ay_n, az_n) * (180.0f / M_PI);
+            pitch_raw = atan2f(-ax_n, sqrtf(ay_n*ay_n + az_n*az_n)) * (180.0f / M_PI);
+        } else {
+            roll_raw = 0.0f;
+            pitch_raw = 0.0f;
+        }
+
+        /* Heading from reference gravity (stable plane, reduces gait wobble) */
+        heading_raw = mahony_heading_with_ref_gravity(
+            ref_grav_x, ref_grav_y, ref_grav_z,
+            mx_cal, my_cal, mz_cal);
 
         /* Apply filters */
         if (!filter_initialized) {

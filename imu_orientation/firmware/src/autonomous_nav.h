@@ -35,10 +35,12 @@ enum autonav_state {
 #define AUTONAV_SPEED_ANGULAR    60   /* Turn speed */
 #define AUTONAV_SPEED_BACKUP    -50   /* Backup speed */
 
-/* Heading control - continuous correction while moving */
-#define HEADING_KP               1.0f  /* Proportional gain for heading correction */
+/* Heading control - PI controller with anti-windup for continuous correction */
+#define HEADING_KP               0.5f  /* Proportional gain (reduced from 1.0 for smoother response) */
+#define HEADING_KI               0.05f /* Integral gain (eliminates steady-state error) */
+#define HEADING_I_MAX            5.0f  /* Integral windup limit (°/s contribution) */
 #define HEADING_TOLERANCE        2.0f  /* Target reached when error < this (degrees) */
-#define AUTONAV_YAW_RATE_MAX    20.0f  /* Maximum yaw rate for autonomous nav (°/s) */
+#define AUTONAV_YAW_RATE_MAX    12.0f  /* Maximum yaw rate for autonomous nav (°/s) - reduced for stability */
 
 /* Turning control parameters (in-place rotation to target heading) */
 #define TURNING_KP               0.8f  /* Proportional gain: 90° error → 72% speed */
