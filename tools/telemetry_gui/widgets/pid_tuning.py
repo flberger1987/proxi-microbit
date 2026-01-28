@@ -15,6 +15,8 @@ class PIDTuningWidget(QWidget):
 
     # Signal emitted when parameters should be sent to robot
     send_parameters = pyqtSignal(dict)  # {'kp': float, 'ki': float, 'kd': float, 'i_max': float, 'd_max': float, 'yaw_max': float}
+    # Signal emitted when refresh (PIDGET) is requested
+    refresh_requested = pyqtSignal()
 
     # Default values (from autonomous_nav.h)
     DEFAULTS = {
@@ -129,6 +131,10 @@ class PIDTuningWidget(QWidget):
 
         layout.addLayout(params_layout)
 
+        # Button row
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(5)
+
         # Send button
         self.send_btn = QPushButton("▶ Send")
         self.send_btn.setStyleSheet("""
@@ -153,10 +159,38 @@ class PIDTuningWidget(QWidget):
             }
         """)
         self.send_btn.clicked.connect(self._on_send)
-        layout.addWidget(self.send_btn)
+        btn_layout.addWidget(self.send_btn)
 
-        # Reset button
-        reset_btn = QPushButton("↺ Reset")
+        # Refresh button (read from robot)
+        self.refresh_btn = QPushButton("⟳ Read")
+        self.refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1a2d3d;
+                border: 1px solid #4499ff;
+                border-radius: 3px;
+                padding: 8px 15px;
+                color: #4499ff;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2a4d5d;
+            }
+            QPushButton:pressed {
+                background-color: #0a1d2d;
+            }
+            QPushButton:disabled {
+                background-color: #2a2a2a;
+                border-color: #555555;
+                color: #666666;
+            }
+        """)
+        self.refresh_btn.clicked.connect(self._on_refresh)
+        btn_layout.addWidget(self.refresh_btn)
+
+        layout.addLayout(btn_layout)
+
+        # Reset button (smaller, secondary)
+        reset_btn = QPushButton("↺ Reset to Defaults")
         reset_btn.setStyleSheet("""
             QPushButton {
                 background-color: #3c3c3c;
@@ -173,8 +207,8 @@ class PIDTuningWidget(QWidget):
         reset_btn.clicked.connect(self._on_reset)
         layout.addWidget(reset_btn)
 
-        # Status label
-        self.status_label = QLabel("")
+        # Status label (shows last sync time)
+        self.status_label = QLabel("Not synced")
         self.status_label.setFont(QFont("Monospace", 8))
         self.status_label.setStyleSheet("color: #888888;")
         self.status_label.setWordWrap(True)
@@ -187,6 +221,12 @@ class PIDTuningWidget(QWidget):
         params = self.get_parameters()
         self.send_parameters.emit(params)
         # Status will be set by dashboard after verification
+
+    def _on_refresh(self):
+        """Request current parameters from robot."""
+        self.refresh_requested.emit()
+        self.status_label.setText("Reading...")
+        self.status_label.setStyleSheet("color: #4499ff;")
 
     def _on_reset(self):
         """Reset to default values."""

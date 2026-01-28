@@ -389,6 +389,7 @@ class TelemetryDashboard(QMainWindow):
         pid_layout = QVBoxLayout(pid_group)
         self.pid_tuning = PIDTuningWidget()
         self.pid_tuning.send_parameters.connect(self._on_send_pid)
+        self.pid_tuning.refresh_requested.connect(self._on_refresh_pid)
         pid_layout.addWidget(self.pid_tuning)
         tuning_col.addWidget(pid_group)
 
@@ -466,6 +467,7 @@ class TelemetryDashboard(QMainWindow):
 
         # PID verification state
         self._pending_pid_params = None
+        self._awaiting_pid_query = False
 
     def _on_packet(self, pkt: dict):
         """Handle incoming telemetry packet."""
@@ -533,12 +535,41 @@ class TelemetryDashboard(QMainWindow):
             self.conn_label.setText(f"Connected: {device_name}")
             self.conn_label.setStyleSheet("color: #00cc66;")
             self.statusbar.showMessage(f"Connected to {device_name}")
+            # Query current PID parameters from robot
+            self._query_pid_on_connect()
         else:
             self.conn_label.setText("Disconnected")
             self.conn_label.setStyleSheet("color: #ff6666;")
             self.statusbar.showMessage("Disconnected")
 
         self.status_panel.update_connection(connected, device_name)
+
+    def _query_pid_on_connect(self):
+        """Query PID parameters from robot after connection."""
+        # Small delay to let connection stabilize
+        QTimer.singleShot(500, self._send_pidget_command)
+
+    def _send_pidget_command(self):
+        """Send PIDGET command to query current PID values."""
+        if self.ble_receiver.client and self.ble_receiver.client.is_connected:
+            self._awaiting_pid_query = True
+            asyncio.ensure_future(self.ble_receiver.send_command("PIDGET"))
+            self.pid_tuning.set_status("Querying...", is_error=False)
+            # Timeout for query
+            QTimer.singleShot(2000, self._pid_query_timeout)
+
+    def _pid_query_timeout(self):
+        """Handle PID query timeout."""
+        if getattr(self, '_awaiting_pid_query', False):
+            self._awaiting_pid_query = False
+            self.pid_tuning.set_status("Query timeout - using defaults", is_error=True)
+
+    def _on_refresh_pid(self):
+        """Handle manual PID refresh request from user."""
+        if not self.ble_receiver.client or not self.ble_receiver.client.is_connected:
+            self.pid_tuning.set_status("Not connected!", is_error=True)
+            return
+        self._send_pidget_command()
 
     def _on_scan_progress(self, message: str):
         """Handle scan progress update."""
@@ -576,7 +607,19 @@ class TelemetryDashboard(QMainWindow):
             except (ValueError, IndexError):
                 pass
 
-            # Verify against pending parameters
+            # Check if this is a response to our initial query
+            if getattr(self, '_awaiting_pid_query', False) and params:
+                self._awaiting_pid_query = False
+                # Update widget with values from robot
+                self.pid_tuning.set_parameters(params)
+                self.logger.set_pid_params(params)
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                self.pid_tuning.set_status(f"Loaded from robot @ {timestamp}", is_error=False)
+                self.statusbar.showMessage("PID parameters loaded from robot")
+                return
+
+            # Verify against pending parameters (after send)
             if self._pending_pid_params and params:
                 sent = self._pending_pid_params
                 # Check if values match (within tolerance)
@@ -593,7 +636,9 @@ class TelemetryDashboard(QMainWindow):
                 self.pid_tuning.set_sending(False)
 
                 if match:
-                    self.pid_tuning.set_status("OK - Values applied", is_error=False)
+                    from datetime import datetime
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    self.pid_tuning.set_status(f"OK @ {timestamp}", is_error=False)
                     self.statusbar.showMessage("PID parameters applied successfully")
                 else:
                     self.pid_tuning.set_status("Mismatch!", is_error=True)

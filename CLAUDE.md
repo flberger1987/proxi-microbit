@@ -456,7 +456,7 @@ K_MSGQ_DEFINE(my_msgq, sizeof(int), 10, 4);
 # Threading
 CONFIG_MULTITHREADING=y
 CONFIG_NUM_PREEMPT_PRIORITIES=16
-CONFIG_MAIN_STACK_SIZE=3072
+CONFIG_MAIN_STACK_SIZE=4096
 
 # GPIO & I2C
 CONFIG_GPIO=y
@@ -479,12 +479,17 @@ CONFIG_BT_BONDABLE=y
 CONFIG_BT_SETTINGS=y
 CONFIG_BT_ZEPHYR_NUS=y
 
-# Persistent Storage für Bonding
+# Persistent Storage (Bonding, Calibration, PID)
 CONFIG_SETTINGS=y
 CONFIG_NVS=y
 CONFIG_FLASH=y
 CONFIG_FLASH_MAP=y
 CONFIG_FLASH_PAGE_LAYOUT=y
+
+# OTA Dual-Slot System
+CONFIG_USE_DT_CODE_PARTITION=y
+CONFIG_CRC=y
+CONFIG_REBOOT=y
 
 # PWM für Motoren und Speaker
 CONFIG_PWM=y
@@ -503,6 +508,9 @@ CONFIG_UART_CONSOLE=y
 
 # Heap (für BLE)
 CONFIG_HEAP_MEM_POOL_SIZE=8192
+
+# Size optimization
+CONFIG_SIZE_OPTIMIZATIONS=y
 ```
 
 ---
@@ -701,94 +709,291 @@ arm-none-eabi-gdb firmware.elf
 
 ---
 
-## Bootloader & Flashen
+## BLE OTA Dual-Slot Bootloader System
+
+Das Projekt verwendet ein eigenes **Boot-Pointer OTA System** für kabellose Firmware-Updates über Bluetooth. Kein MCUboot erforderlich.
+
+### Flash-Layout (nRF52833 512KB)
+
+```
+┌─────────────────────┬────────────┬─────────┐
+│ Mini-Bootloader     │ 0x00000    │ 8 KB    │
+│ (Boot-Pointer)      │ - 0x02000  │         │
+├─────────────────────┼────────────┼─────────┤
+│ Slot A (Primary)    │ 0x02000    │ 244 KB  │
+│                     │ - 0x3F000  │         │
+├─────────────────────┼────────────┼─────────┤
+│ Slot B (Secondary)  │ 0x3F000    │ 244 KB  │
+│                     │ - 0x7C000  │         │
+├─────────────────────┼────────────┼─────────┤
+│ Boot Control Block  │ 0x7C000    │ 4 KB    │
+│ (Pointer + Flags)   │ - 0x7D000  │         │
+├─────────────────────┼────────────┼─────────┤
+│ OTA State           │ 0x7D000    │ 4 KB    │
+│ (Transfer Progress) │ - 0x7E000  │         │
+├─────────────────────┼────────────┼─────────┤
+│ Settings (NVS)      │ 0x7E000    │ 8 KB    │
+│ (Calibration, PID,  │ - 0x80000  │         │
+│  BLE Bonds)         │            │         │
+└─────────────────────┴────────────┴─────────┘
+```
+
+### Boot-Pointer Konzept
+
+Anstatt Firmware zu kopieren, wird nur ein **Pointer** auf den aktiven Slot umgeschaltet:
+
+1. **OTA-Update** schreibt neue Firmware in den **inaktiven** Slot
+2. Nach erfolgreicher **CRC32-Validierung** wird der Boot-Pointer umgeschaltet
+3. **Automatischer Fallback**: Nach 3 fehlgeschlagenen Boot-Versuchen → Rollback zum anderen Slot
+4. **Settings bleiben erhalten**: Kalibrierung, PID-Parameter, BLE-Bonds in separater Partition
+
+### Bootloader Boot-Entscheidung
+
+Der Mini-Bootloader (8KB) trifft beim Start folgende Entscheidungen:
+
+```
+Boot-Entscheidung:
+  1. Boot Control Block lesen und validieren
+  2. CRC32 beider Slots prüfen
+  3. Slot wählen:
+     ├─ Beide gültig → Höhere Build-Nummer gewinnt
+     ├─ Nur einer gültig → Diesen verwenden
+     └─ Keiner gültig → Fallback zu Slot A
+  4. boot_count prüfen:
+     └─ >=3 → Auf anderen Slot wechseln (wenn gültig)
+  5. boot_count inkrementieren
+  6. Vector Table validieren (SP in RAM, Reset in Slot)
+  7. Zu Firmware springen
+```
+
+**Erfolgreicher Boot:**
+- Firmware ruft `boot_control_confirm_boot()` auf
+- Setzt `boot_count` auf 0 zurück
+
+**Fallback-Szenarien:**
+- Firmware crasht vor `confirm_boot()` → boot_count steigt bei jedem Reset
+- Nach 3 Versuchen → Automatischer Wechsel zum anderen Slot
+- Falls anderer Slot auch ungültig → Trotzdem Slot A versuchen
+
+### Boot Control Block Struktur
+
+```c
+struct boot_control {
+    uint32_t magic;           /* 0xB007F1E0 ("BOOT FILE" in leetspeak) */
+    uint8_t  version;         /* Struktur-Version (aktuell: 2) */
+    uint8_t  active_slot;     /* 0 = Slot A, 1 = Slot B */
+    uint8_t  slot_a_valid;    /* 1 = gültige Firmware in Slot A */
+    uint8_t  slot_b_valid;    /* 1 = gültige Firmware in Slot B */
+    uint8_t  boot_count;      /* Fallback-Zähler (>=3 → Rollback) */
+    uint8_t  fallback_reason; /* BOOT_FALLBACK_* Code */
+    uint8_t  last_boot_slot;  /* Diagnostik: tatsächlich gebooteter Slot */
+    uint8_t  reserved;        /* Alignment padding */
+    uint32_t slot_a_crc;      /* CRC32 der Firmware in Slot A */
+    uint32_t slot_b_crc;      /* CRC32 der Firmware in Slot B */
+    uint32_t slot_a_size;     /* Firmware-Größe in Slot A (Bytes) */
+    uint32_t slot_b_size;     /* Firmware-Größe in Slot B (Bytes) */
+    uint32_t slot_a_version;  /* Build-Nummer in Slot A */
+    uint32_t slot_b_version;  /* Build-Nummer in Slot B */
+    uint32_t checksum;        /* CRC32 dieser Struktur */
+};
+```
+
+**Fallback Reason Codes:**
+- `0` NONE - Normaler Boot
+- `1` CRC_FAIL - Primärer Slot CRC-Fehler
+- `2` VERSION - Niedrigere Version (anderer Slot ungültig)
+- `3` BOOT_COUNT - Zu viele Boot-Versuche (>=3)
+
+### OTA State Machine
+
+```
+          ┌─────────────────────────────────────────┐
+          │                                         │
+          ▼                                         │
+    ┌──────────┐    INIT      ┌─────────┐    ┌─────┴─────┐
+    │   IDLE   │─────────────►│  ERASE  │───►│ TRANSFER  │
+    └──────────┘              └─────────┘    └───────────┘
+          ▲                                       │ │
+          │    ┌──────────┐                       │ │ disconnect
+          │◄───│  ABORT   │◄──────────────────────┘ │
+          │    └──────────┘                         ▼
+          │                                  ┌───────────┐
+          │    ┌──────────┐    QUERY         │ SUSPENDED │
+          │◄───│ VALIDATE │◄─────────────────┴───────────┘
+          │    └────┬─────┘         reconnect
+          │         │ CRC OK
+          │         ▼
+          │    ┌──────────┐
+          └────│  COMMIT  │───► REBOOT
+               └──────────┘
+```
+
+**Zustände (enum ota_state):**
+
+| Zustand | Beschreibung |
+|---------|--------------|
+| `IDLE` | Bereit für neues OTA |
+| `BACKUP` | Sendet aktuelle Firmware an Host |
+| `ERASE` | Löscht Ziel-Slot (Page für Page) |
+| `TRANSFER` | Empfängt Datenblöcke |
+| `SUSPENDED` | Verbindung verloren, wartet auf Resume |
+| `VALIDATE` | Prüft CRC32 der empfangenen Firmware |
+| `COMMIT` | Boot-Pointer umgeschaltet, Reboot |
+| `ABORT` | Abgebrochen, zurück zu IDLE |
+
+### OTA-Protokoll
+
+**BLE-basiert über Nordic UART Service (NUS).**
+
+Alle OTA-Pakete beginnen mit `0xF0` (Magic Byte) gefolgt vom Command-Byte.
+
+**Commands (Host → Device):**
+
+| Command | Code | Payload | Beschreibung |
+|---------|------|---------|--------------|
+| `OTA_INIT` | 0x01 | size(4B), crc32(4B), version(16B) | Start OTA, Ziel-Slot löschen |
+| `OTA_DATA` | 0x02 | block_num(2B), crc16(2B), data(224B) | Firmware-Block |
+| `OTA_QUERY` | 0x03 | - | Status abfragen (für Resume) |
+| `OTA_ABORT` | 0x04 | - | OTA abbrechen |
+| `OTA_VALIDATE` | 0x05 | - | Finale CRC32-Validierung starten |
+| `OTA_BACKUP_REQ` | 0x06 | - | Firmware-Backup anfordern |
+| `OTA_BACKUP_ACK` | 0x07 | - | Nächsten Backup-Block anfordern |
+
+**Responses (Device → Host):**
+
+| Response | Code | Payload | Beschreibung |
+|----------|------|---------|--------------|
+| `RESP_OK` | 0x00 | - | Generischer Erfolg |
+| `RESP_READY` | 0x01 | status struct | Bereit für Transfer |
+| `RESP_ACK` | 0x02 | block_num(2B) | Block erfolgreich empfangen |
+| `RESP_NAK` | 0x03 | block_num(2B), error(1B) | Block-Fehler, bitte wiederholen |
+| `RESP_STATUS` | 0x04 | status struct | Aktueller Status (für Resume) |
+| `RESP_VALID_OK` | 0x05 | - | Validierung OK → Reboot |
+| `RESP_VALID_FAIL` | 0x06 | expected(4B), actual(4B) | CRC32 stimmt nicht |
+| `RESP_BACKUP_DATA` | 0x07 | block_num(2B), crc16(2B), data(224B) | Backup-Block |
+| `RESP_BACKUP_DONE` | 0x08 | size(4B), crc32(4B) | Backup vollständig |
+| `RESP_ERROR` | 0x10 | error_code(1B) | Fehler aufgetreten |
+
+**Error Codes:**
+- `0x01` CRC - CRC-Prüfsumme falsch
+- `0x02` SEQUENCE - Falsche Block-Nummer
+- `0x03` SIZE - Firmware zu groß
+- `0x04` FLASH - Flash-Schreibfehler
+- `0x05` STATE - Ungültiger Zustand für Operation
+- `0x06` TIMEOUT - Zeitüberschreitung
+- `0x07` INVALID - Ungültiges Paket
+
+### OTA Transfer-Details
+
+**Block-Struktur:**
+- Block-Größe: 224 Bytes (OTA_BLOCK_SIZE)
+- Paket-Format: `[0xF0][cmd][block_num:2LE][crc16:2LE][data:224]`
+- Letzter Block: Mit 0xFF aufgefüllt (Flash-Löschwert)
+- CRC16: CCITT (Polynom 0x1021, Initial 0xFFFF)
+- Block-Nummerierung: 1-basiert (1, 2, 3, ..., total_blocks)
+
+**Flash-Timing (BLE-Aware):**
+- Schreibt in 256-Byte Chunks (~2.6ms pro Chunk)
+- 5ms Pause zwischen Chunks (BLE Events verarbeiten)
+- 30ms Pause nach voller Page (4KB)
+- 50ms Pause zwischen Page-Erases
+
+**Resume nach Disconnect:**
+1. Transfer unterbrochen → SUSPENDED
+2. Host reconnectet → sendet QUERY
+3. Device antwortet mit last_block
+4. Host sendet ab last_block+1 weiter
+
+**Thread-Management während OTA:**
+- Suspendiert: sensors, motor, ir_sensors, autonav, telemetry
+- Aktiv bleiben: main (Display), BLE Stack
+
+### Build & Flash Befehle
+
+```bash
+cd imu_orientation/firmware
+
+# Nur bauen
+./build_flash.sh
+
+# Initial-Flash (LÖSCHT Settings!)
+./build_flash.sh flash
+
+# OTA Update via BLE (empfohlen für Updates)
+./build_flash.sh ota
+
+# OTA mit Backup vorher
+./build_flash.sh ota --backup
+
+# USB-Flash ohne Settings zu löschen
+./build_flash.sh flash-app
+
+# Backup der aktuellen Firmware
+./build_flash.sh backup
+
+# OTA-Status abfragen
+./build_flash.sh status
+
+# Bootloader separat bauen
+./build_flash.sh bootloader
+
+# Build-Verzeichnis löschen
+./build_flash.sh clean
+```
+
+### Datensicherheit bei Updates
+
+| Update-Methode | Kalibrierung | PID-Params | BLE-Bonds |
+|----------------|--------------|------------|-----------|
+| `./build_flash.sh ota` | ✅ Erhalten | ✅ Erhalten | ✅ Erhalten |
+| `./build_flash.sh flash-app` | ✅ Erhalten | ✅ Erhalten | ✅ Erhalten |
+| `./build_flash.sh flash` | ❌ GELÖSCHT | ❌ GELÖSCHT | ❌ GELÖSCHT |
+
+**Empfohlener Workflow:**
+1. **Erstmaliges Setup:** `./build_flash.sh flash` (nur einmal)
+2. **Kalibrierung:** Button B 3s halten
+3. **Alle weiteren Updates:** `./build_flash.sh ota`
+
+### Python OTA-Tool
+
+```bash
+# Installation
+pip install bleak tqdm intelhex
+
+# OTA Update (mit Backup)
+python tools/ota_upload.py build/app/zephyr.bin
+
+# OTA Update ohne Backup (schneller)
+python tools/ota_upload.py build/app/zephyr.bin --no-backup
+
+# Nur Backup der aktuellen Firmware
+python tools/ota_upload.py --backup
+
+# Status abfragen
+python tools/ota_upload.py --status
+
+# Resume nach Abbruch (ab Block 50 weitermachen)
+python tools/ota_upload.py build/app/zephyr.bin --resume 50
+```
+
+**Features:**
+- Automatisches Backup vor Update (deaktivierbar mit `--no-backup`)
+- Resume nach Verbindungsabbruch (mit `--resume <block>`)
+- Unterstützt `.hex` (Intel HEX) und `.bin` (raw binary) Formate
+- Exponentielles Backoff bei Block-Fehlern (3 Retries)
+- Progress-Bar mit Geschwindigkeitsanzeige
 
 ### Standard: DAPLink
 
 Der micro:bit verwendet DAPLink als Interface-Firmware:
 - **Drag & Drop**: `.hex` Datei auf `MICROBIT` Laufwerk kopieren
 - **CMSIS-DAP**: Debugging über USB
-- **CDC Serial**: Serielle Konsole
+- **CDC Serial**: Serielle Konsole (115200 Baud)
 
-**Dokumentation:** https://tech.microbit.org/software/daplink-interface/
-
-### DAPLink Firmware Update
-
-**Maintenance Mode betreten:**
+**Maintenance Mode** (bei Bootloader-Problemen):
 1. RESET-Taste gedrückt halten
 2. USB-Kabel anschließen
 3. Laufwerk erscheint als `MAINTENANCE`
-4. Neue DAPLink `.hex` Firmware kopieren
-
-**Releases:** https://github.com/ARMmbed/DAPLink/releases
-
-### Kommandozeilen-Flashen
-
-**Detaillierte Anleitung:** [docs/bootloader/pyocd-flashing.md](docs/bootloader/pyocd-flashing.md)
-
-#### Mit MCUboot (Empfohlen für OTA-fähige Firmware)
-
-```bash
-# 1. Chip löschen
-pyocd erase -t nrf52833 --chip
-
-# 2. MCUboot Bootloader flashen
-pyocd flash -t nrf52833 -f 1000000 build/mcuboot/zephyr/zephyr.hex
-
-# 3. Signierte Anwendung flashen
-pyocd flash -t nrf52833 -f 1000000 build/firmware/zephyr/zephyr.signed.hex
-
-# 4. Reset
-pyocd reset -t nrf52833
-```
-
-#### Build-Script (imu_orientation)
-
-```bash
-cd imu_orientation/firmware
-./build_flash.sh          # Nur bauen
-./build_flash.sh flash    # Bauen + Flashen (MCUboot + App)
-./build_flash.sh flash-app # Nur App flashen (MCUboot vorhanden)
-./build_flash.sh ble      # OTA Update via Bluetooth
-```
-
-#### Ohne MCUboot (Einfach)
-
-```bash
-# pyOCD
-pyocd flash -t nrf52833 firmware.hex
-
-# OpenOCD
-openocd -f interface/cmsis-dap.cfg -f target/nrf52.cfg \
-        -c "program firmware.hex verify reset exit"
-
-# nrfjprog (Nordic Tool)
-nrfjprog --program firmware.hex -f nrf52 --verify
-nrfjprog --reset -f nrf52
-
-# TinyGo
-tinygo flash -target=microbit-v2 main.go
-```
-
-### Alternative: UF2 Bootloader
-
-UF2 ist ein benutzerfreundliches Bootloader-Format (Doppelklick auf RESET aktiviert Boot-Modus).
-
-```bash
-# UF2 Datei erstellen
-python uf2conv.py firmware.hex --family 0xADA52840 -o firmware.uf2
-
-# UF2 Bootloader Repository
-git clone https://github.com/makerdiary/uf2-bootloader
-```
-
-**Hinweis:** UF2-Installation ersetzt den originalen DAPLink!
-
-### Bootloader Recovery
-
-Falls Bootloader beschädigt:
-1. **Maintenance Mode** versuchen (RESET beim USB-Anstecken)
-2. Falls nicht möglich: **Externer SWD-Debugger** (J-Link, ST-Link) über SWD-Pads auf Rückseite
 
 ---
 
@@ -799,18 +1004,17 @@ ProxiMicro/
 ├── CLAUDE.md                           # Diese Datei (Developer Reference)
 ├── README.md                           # Projekt-Übersicht & Quick Start
 ├── start_dashboard.sh                  # Telemetry Dashboard Startskript
-├── controller_mapping.py               # Xbox Controller Mapping Reference
-├── serial_monitor.py                   # Serial Port Monitor Tool
 │
 ├── tools/
+│   ├── ota_upload.py                   # BLE OTA Upload Tool
 │   ├── telemetry_receiver.py           # BLE Telemetry Empfänger (bleak)
-│   ├── requirements.txt                # Python Dependencies
+│   ├── analyze_telemetry.py            # CSV Telemetrie-Analyse
+│   ├── heading_simulation.py           # PID Tuning Simulation
 │   │
 │   └── telemetry_gui/                  # PyQt6 Telemetry Dashboard
-│       ├── __init__.py
 │       ├── dashboard.py                # Haupt-Dashboard-Fenster
 │       ├── ble_bridge.py               # BLE-Qt Async Bridge
-│       └── widgets/                    # Dashboard Widgets
+│       └── widgets/
 │           ├── compass.py              # Kompass-Anzeige
 │           ├── heading_graph.py        # Heading-Verlauf Graph
 │           ├── ir_sensors.py           # IR Distanz-Anzeige
@@ -818,66 +1022,60 @@ ProxiMicro/
 │           ├── yaw_rate.py             # Yaw Rate Gauge
 │           ├── orientation.py          # Roll/Pitch Anzeige
 │           ├── status_panel.py         # Status-Panel
-│           └── thread_stats.py         # Thread CPU/Stack Statistiken
+│           ├── thread_stats.py         # Thread Statistiken
+│           ├── pid_tuning.py           # PID Parameter Tuning
+│           ├── variance_display.py     # Sensor-Varianz Anzeige
+│           └── log_analysis.py         # Log-Analyse Widget
 │
-├── imu_orientation/                    # IMU Orientierungs-Firmware
+├── imu_orientation/
 │   ├── firmware/
-│   │   ├── src/                        # Quellcode (18 .c + 17 .h)
-│   │   │   ├── main.c                  # Hauptprogramm, State Machine, Display
+│   │   ├── src/                        # Quellcode (20 .c + 19 .h)
+│   │   │   ├── main.c                  # Hauptprogramm, State Machine
 │   │   │   ├── robot_state.c/h         # Globaler Roboter-Zustand
-│   │   │   ├── sensors.c/h             # LSM303AGR IMU Treiber
-│   │   │   ├── orientation.c/h         # Roll/Pitch/Heading Berechnung
-│   │   │   ├── mahony_filter.c/h       # Mahony AHRS Filter (Quaternion)
-│   │   │   ├── ble_central.c/h         # BLE Central (Xbox Controller)
-│   │   │   ├── hid_parser.c/h          # Xbox/PS5 HID Report Parser
-│   │   │   ├── motor_driver.c/h        # PWM H-Brücke Steuerung
+│   │   │   ├── sensors.c/h             # LSM303AGR + 2D Kalman
+│   │   │   ├── orientation.c/h         # Roll/Pitch/Heading
+│   │   │   ├── mahony_filter.c/h       # Mahony AHRS (Quaternion)
+│   │   │   ├── ble_central.c/h         # BLE Central (Xbox)
+│   │   │   ├── ble_output.c/h          # Nordic UART Service
+│   │   │   ├── smp_bt.c/h              # BLE Stack Init
+│   │   │   ├── hid_parser.c/h          # Xbox/PS5 HID Parser
+│   │   │   ├── motor_driver.c/h        # PWM H-Brücke
 │   │   │   ├── autonomous_nav.c/h      # Autonome Navigation
-│   │   │   ├── yaw_controller.c/h      # PID Yaw Rate Regelung
-│   │   │   ├── ir_sensors.c/h          # IR Hindernissensoren (ADC+Kalman)
+│   │   │   ├── yaw_controller.c/h      # PID Yaw Rate
+│   │   │   ├── ir_sensors.c/h          # IR + 1D Kalman
 │   │   │   ├── audio.c/h               # PWM Tongenerierung
-│   │   │   ├── telemetry.c/h           # Binary Telemetrie (~20Hz)
-│   │   │   ├── ble_output.c/h          # Nordic UART Service (NUS)
-│   │   │   ├── smp_bt.c/h              # BLE Stack Initialisierung
-│   │   │   ├── serial_output.c/h       # USB Serial Debug Output
-│   │   │   ├── motor_test.c/h          # GPIO Test Modus
-│   │   │   └── sysid.c/h               # System Identification Test
+│   │   │   ├── telemetry.c/h           # Binary Telemetrie
+│   │   │   ├── serial_output.c/h       # USB Debug
+│   │   │   ├── boot_control.c/h        # Boot-Pointer Verwaltung
+│   │   │   ├── ota_update.c/h          # OTA State Machine
+│   │   │   ├── motor_test.c/h          # GPIO Test
+│   │   │   └── sysid.c/h               # System Identification
+│   │   │
+│   │   ├── bootloader/                 # Mini-Bootloader (8KB)
+│   │   │   ├── src/main.c              # Boot-Pointer Logik
+│   │   │   ├── boards/
+│   │   │   │   └── bbc_microbit_v2.overlay
+│   │   │   ├── prj.conf                # Minimale Zephyr-Config
+│   │   │   └── CMakeLists.txt
 │   │   │
 │   │   ├── boards/
-│   │   │   └── bbc_microbit_v2.overlay # Device Tree (PWM Pins)
+│   │   │   └── bbc_microbit_v2.overlay # Flash-Layout + PWM
 │   │   │
-│   │   ├── sysbuild/
-│   │   │   └── mcuboot.conf            # MCUboot Bootloader Konfig
-│   │   │
-│   │   ├── tools/
-│   │   │   ├── imu_plot.py             # Echtzeit IMU Plotting
-│   │   │   └── ir_plot.py              # IR Sensor Plotting
+│   │   ├── build/                      # Build-Outputs (gitignored)
+│   │   │   ├── app/zephyr.bin          # Firmware Binary
+│   │   │   └── bootloader/zephyr.hex   # Bootloader HEX
 │   │   │
 │   │   ├── prj.conf                    # Zephyr Haupt-Konfiguration
-│   │   ├── bt.conf                     # Alternative BLE Konfiguration
-│   │   ├── sysbuild.conf               # MCUboot Sysbuild Konfig
 │   │   ├── CMakeLists.txt              # Build-Konfiguration
 │   │   └── build_flash.sh              # Build & Flash Script
 │   │
 │   └── visualizer/                     # 3D Orientierungs-Visualisierer
-│       ├── visualizer.py               # Hauptprogramm (PyGame/OpenGL)
-│       ├── cube_renderer.py            # PyOpenGL Cube Renderer
-│       ├── serial_reader.py            # Serial Data Reader
-│       └── requirements.txt            # Python Dependencies
+│       ├── visualizer.py
+│       └── cube_renderer.py
 │
 └── docs/
-    ├── hardware/
-    │   ├── microbit-v2-hardware.md     # Detaillierte Hardware-Docs
-    │   ├── kosmos-proxi.md             # Proxi-spezifische Infos
-    │   └── xbox-controller-ble-hid.md  # Xbox Controller BLE Protokoll
-    ├── software/
-    │   ├── zephyr-rtos.md              # Zephyr Setup & Beispiele
-    │   ├── codal-sdk.md                # CODAL SDK Details
-    │   └── freertos-option.md          # FreeRTOS Alternative
-    ├── debugging/
-    │   └── debug-setup.md              # pyOCD/OpenOCD Setup
-    └── bootloader/
-        ├── daplink-bootloader.md       # Bootloader Details
-        └── pyocd-flashing.md           # pyOCD Programmier-Anleitung
+    └── hardware/
+        └── xbox-controller-ble-hid.md  # Xbox BLE HID Protokoll
 ```
 
 ---
@@ -1075,7 +1273,7 @@ struct telemetry_packet {
 | 16 | H | ir_right_mm | **1D Kalman Filter** (Distanz) |
 | 18 | b | motor_linear | Motor Command (-100 bis +100) |
 | 19 | b | motor_angular | Motor Command (-100 bis +100) |
-| 20 | B | nav_state | enum autonav_state (0-6) |
+| 20 | B | nav_state | enum autonav_state (0-3) |
 | 21 | B | flags | Bit 0: autonav, Bit 1: motors |
 | 22 | H | target_heading_x10 | Autonomous Nav Target |
 | 24 | hhh | raw_ax/ay/az | **Roh** Accel (milli-g, User coords) |
@@ -1199,11 +1397,10 @@ CAL: Saved to flash
 ```
 
 **Wichtig:**
-- Kalibrierung wird im Flash persistent gespeichert (überlebt Neustart)
-- **Beim Flashen mit `pyocd erase --chip` geht die Kalibrierung verloren!**
-- Normales Flashen mit `pyocd flash` behält die Kalibrierung (Settings-Partition bleibt)
-- Nach Firmware-Update mit neuer Kalibrierungs-Version: Neu kalibrieren erforderlich
-- Nach Verlust: Neu kalibrieren mit Long-press Button B
+- Kalibrierung wird in NVS-Partition @ 0x7E000 gespeichert (überlebt Neustart)
+- **`./build_flash.sh flash` löscht die Kalibrierung!** (chip erase)
+- **`./build_flash.sh ota` und `flash-app` behalten die Kalibrierung!**
+- Nach Verlust: Neu kalibrieren mit Long-press Button B (3s)
 
 **Kalibrierung via BLE:**
 ```
@@ -1409,19 +1606,27 @@ PID-basierte Regelung der Drehgeschwindigkeit mit Magnetometer-Feedback.
 ```bash
 cd imu_orientation/firmware
 
-# Bauen (ohne MCUboot für direktes Flashen)
+# Nur bauen
 ./build_flash.sh
 
-# Bauen und Flashen
+# Initial-Flash (Bootloader + App) - LÖSCHT Settings!
 ./build_flash.sh flash
 
-# Nur Flashen (wenn bereits gebaut)
-pyocd flash -t nrf52833 build/firmware/zephyr/zephyr.hex
+# OTA Update via BLE (empfohlen für alle weiteren Updates)
+./build_flash.sh ota
+
+# USB-Flash ohne Settings zu löschen
+./build_flash.sh flash-app
 ```
 
 ### Aktuelle Konfiguration
 
-MCUboot ist derzeit **deaktiviert** für einfaches direktes Flashen. Für OTA-Updates muss MCUboot in `prj.conf` wieder aktiviert werden.
+- **Boot-System**: Custom Mini-Bootloader mit Boot-Pointer (8KB)
+- **OTA**: BLE-basiert über Nordic UART Service
+- **Firmware-Größe**: ~244KB (99.98% von 244KB Slot)
+- **Settings**: 8KB NVS (Kalibrierung, PID, BLE-Bonds)
+
+**Wichtig:** `./build_flash.sh flash` löscht alle Settings! Für Updates immer `ota` oder `flash-app` verwenden.
 
 ### Thread-Architektur
 
@@ -1429,15 +1634,15 @@ Die Firmware verwendet mehrere Zephyr-Threads für Echtzeit-Verarbeitung:
 
 | Thread | Priorität | Stack | Funktion |
 |--------|-----------|-------|----------|
-| Main | Default | 3072B | State Machine, Buttons, Display |
+| Main | Default | 4096B | State Machine, Buttons, Display |
 | Motor | 2 | 768B | PWM Motor Control (50Hz) |
 | BLE Central | 3 | 2048B | Xbox Controller Scan/Connect |
-| Sensor | 5 | 1024B | IMU Reading + Orientation (50Hz) |
+| Sensor | 5 | 1024B | IMU Reading + 2D Kalman (50Hz) |
 | Audio | 6 | 512B | Tone Generation |
-| IR Sensors | - | - | ADC Obstacle Reading |
+| IR Sensors | - | - | ADC + 1D Kalman |
 | Autonomous Nav | - | - | Heading Control + Avoidance |
 | Telemetry | - | - | Binary Packet Streaming (20Hz) |
-| Serial Output | - | - | USB Debug Output |
+| OTA Update | - | - | Flash Write + Validation |
 
 **Message Queues:**
 
@@ -1456,49 +1661,51 @@ Die Firmware verwendet mehrere Zephyr-Threads für Echtzeit-Verarbeitung:
 
 **Installation:**
 ```bash
-pip install pyserial bleak pygame PyOpenGL numpy
+pip install pyserial bleak PyQt6 tqdm intelhex numpy
 ```
 
-**1. Telemetry Dashboard (GUI)** (`start_dashboard.sh`)
+**1. OTA Upload Tool** (`tools/ota_upload.py`)
 ```bash
-# PyQt6 Dashboard starten (empfohlen)
+# Firmware via BLE updaten
+python tools/ota_upload.py build/app/zephyr.bin
+
+# Mit Backup vorher
+python tools/ota_upload.py build/app/zephyr.bin --backup
+
+# Nur Backup der aktuellen Firmware
+python tools/ota_upload.py --backup
+
+# Status abfragen
+python tools/ota_upload.py --status
+```
+
+**2. Telemetry Dashboard (GUI)** (`start_dashboard.sh`)
+```bash
+# PyQt6 Dashboard starten
 ./start_dashboard.sh
 
 # Oder direkt:
-python tools/telemetry_receiver.py --gui
+python -m tools.telemetry_gui.dashboard
 ```
 
-**2. Telemetry Receiver (Console)** (`tools/telemetry_receiver.py`)
+**3. Telemetry Receiver (Console)** (`tools/telemetry_receiver.py`)
 ```bash
-# BLE Telemetrie-Pakete empfangen und im Terminal anzeigen
+# BLE Telemetrie-Pakete empfangen
 python tools/telemetry_receiver.py
 
 # Mit CSV-Logging:
 python tools/telemetry_receiver.py --log telemetry.csv
 ```
 
-**3. Serial Monitor** (`serial_monitor.py`)
+**4. Telemetry Analyse** (`tools/analyze_telemetry.py`)
 ```bash
-# USB Serial Output anzeigen
-python serial_monitor.py
+# CSV-Datei analysieren und plotten
+python tools/analyze_telemetry.py telemetry.csv
 ```
 
-**4. IMU Plot** (`imu_orientation/firmware/tools/imu_plot.py`)
-```bash
-# Echtzeit Roll/Pitch/Heading Plot
-python imu_orientation/firmware/tools/imu_plot.py
-```
-
-**5. IR Plot** (`imu_orientation/firmware/tools/ir_plot.py`)
-```bash
-# IR Sensor Werte plotten
-python imu_orientation/firmware/tools/ir_plot.py
-```
-
-**6. 3D Visualizer** (`imu_orientation/visualizer/`)
+**5. 3D Visualizer** (`imu_orientation/visualizer/`)
 ```bash
 cd imu_orientation/visualizer
-pip install -r requirements.txt
 python visualizer.py
 ```
 
@@ -1510,25 +1717,30 @@ python visualizer.py
 ```bash
 pip install west
 west init ~/zephyrproject && cd ~/zephyrproject && west update
+source ~/zephyrproject/zephyr/zephyr-env.sh
 ```
 
-### 2. Erstes Programm bauen
+### 2. Firmware bauen
 ```bash
-cd ~/zephyrproject/zephyr
-west build -b bbc_microbit_v2 samples/basic/blinky
+cd /path/to/ProxiMicro/imu_orientation/firmware
+./build_flash.sh
 ```
 
-### 3. Flashen
+### 3. Initial-Flash (einmalig)
 ```bash
-west flash
+./build_flash.sh flash
+# Danach: Magnetometer kalibrieren (Button B 3s halten)
 ```
 
-### 4. Debuggen
+### 4. Updates via BLE OTA
 ```bash
-pip install pyocd
-pyocd gdbserver -t nrf52833
-# In anderem Terminal:
-arm-none-eabi-gdb build/zephyr/zephyr.elf -ex "target remote :3333"
+./build_flash.sh ota
+```
+
+### 5. Telemetry Dashboard
+```bash
+cd /path/to/ProxiMicro
+./start_dashboard.sh
 ```
 
 ---

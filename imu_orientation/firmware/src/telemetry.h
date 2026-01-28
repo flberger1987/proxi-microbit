@@ -51,7 +51,7 @@ struct telemetry_packet {
     /* Motor & Status (4 bytes) */
     int8_t   motor_linear;       /* Linear velocity command (-100 to +100) */
     int8_t   motor_angular;      /* Angular velocity command (-100 to +100) */
-    uint8_t  nav_state;          /* enum autonav_state (0=DISABLED, 1=HEADING_HOLD, 2=TURNING, 3=BACKING_UP) */
+    uint8_t  nav_state;          /* enum autonav_state (0=DISABLED, 1=HEADING_HOLD, 2=TURNING, 3=SCANNING) */
     uint8_t  flags;              /* Bit 0: autonav_enabled, Bit 1: motors_enabled */
 
     /* Navigation (2 bytes) */
