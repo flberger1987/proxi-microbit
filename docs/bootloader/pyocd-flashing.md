@@ -9,391 +9,197 @@ pyOCD ist ein Python-basiertes Tool für die Programmierung und das Debugging vo
 ## Installation
 
 ```bash
-# Basis-Installation
 pip install pyocd
 
-# Mit UV (empfohlen)
-uv pip install pyocd
-
-# Target Pack für nRF52833 installieren (optional, meist automatisch)
+# Target Pack für nRF52833 (optional, meist automatisch)
 pyocd pack install nrf52833
 ```
 
-### Voraussetzungen prüfen
+### Verbindung prüfen
 
 ```bash
-# Verfügbare Targets anzeigen
-pyocd list --targets | grep -i nrf
-
 # Verbundene Probes anzeigen
 pyocd list --probes
 ```
 
-Erwartete Ausgabe bei angeschlossenem micro:bit:
+Erwartete Ausgabe:
 ```
   #   Probe/Board             Unique ID            Target
 --------------------------------------------------------------------------------
   0   BBC micro:bit CMSIS-DAP 99039000...          n/a
 ```
 
-## Grundlegende Flash-Befehle
+---
 
-### HEX-Datei flashen
+## ProxiMicro Flash-Layout
 
-```bash
-# Standard: Flash mit automatischem Sektor-Erase
-pyocd flash -t nrf52833 firmware.hex
+Das Projekt verwendet ein **Boot-Pointer Dual-Slot System** (kein MCUboot):
 
-# Kurzform
-pyocd flash -t nrf52 firmware.hex
+```
+┌─────────────────────┬────────────┬─────────┐
+│ Mini-Bootloader     │ 0x00000    │ 8 KB    │  ← Prüft Boot Control, springt zu Slot
+├─────────────────────┼────────────┼─────────┤
+│ Slot A (Primary)    │ 0x02000    │ 244 KB  │  ← Firmware Slot A
+├─────────────────────┼────────────┼─────────┤
+│ Slot B (Secondary)  │ 0x3F000    │ 244 KB  │  ← Firmware Slot B
+├─────────────────────┼────────────┼─────────┤
+│ Boot Control Block  │ 0x7C000    │ 4 KB    │  ← Aktiver Slot, CRCs, Flags
+├─────────────────────┼────────────┼─────────┤
+│ OTA State           │ 0x7D000    │ 4 KB    │  ← Transfer-Progress
+├─────────────────────┼────────────┼─────────┤
+│ Settings (NVS)      │ 0x7E000    │ 8 KB    │  ← Kalibrierung, PID, BLE Bonds
+└─────────────────────┴────────────┴─────────┘
 ```
 
-### BIN-Datei flashen
+---
 
-Bei BIN-Dateien muss die Zieladresse angegeben werden:
+## Empfohlenes Flash-Verfahren
 
-```bash
-# Flash ab Standard-Adresse 0x0
-pyocd flash -t nrf52833 -a 0x0 firmware.bin
-
-# Flash an spezifische Adresse (z.B. nach Bootloader)
-pyocd flash -t nrf52833 -a 0x27000 application.bin
-```
-
-### ELF-Datei flashen
+### Option 1: Build-Script (Empfohlen)
 
 ```bash
-pyocd flash -t nrf52833 firmware.elf
+cd imu_orientation/firmware
+
+# Initial-Flash (Bootloader + App) - LÖSCHT Settings!
+./build_flash.sh flash
+
+# Nur App flashen (behält Settings)
+./build_flash.sh flash-app
+
+# OTA via BLE (behält alles)
+./build_flash.sh ota
 ```
 
-## Erase-Modi
+### Option 2: Manuell mit pyOCD
 
-### Sektor-Erase (Standard)
-
-Löscht nur die Sektoren, die für das Flashen benötigt werden:
-
-```bash
-pyocd flash -t nrf52833 --erase sector firmware.hex
-```
-
-### Chip-Erase
-
-Löscht den gesamten Flash-Speicher vor dem Programmieren:
-
-```bash
-pyocd flash -t nrf52833 --erase chip firmware.hex
-```
-
-**Wann Chip-Erase verwenden:**
-- Nach fehlgeschlagenen Flash-Versuchen
-- Bei beschädigtem Flash-Inhalt
-- Bei Wechsel zwischen unterschiedlichen Firmware-Typen
-- Bei Problemen mit dem Mass-Erase
-
-### Kein Erase
-
-Überspringt das Löschen (nur für partielle Updates):
-
-```bash
-pyocd flash -t nrf52833 --erase none firmware.hex
-```
-
-## Verifikation
-
-### Nach dem Flashen verifizieren
-
-```bash
-pyocd flash -t nrf52833 --verify firmware.hex
-```
-
-### Nur verifizieren (ohne Flashen)
-
-```bash
-# Flash-Inhalt lesen und mit Datei vergleichen
-pyocd commander -t nrf52833 -c "compare 0x0 firmware.hex" -c "exit"
-```
-
-## Standalone Erase-Befehle
-
-### Gesamten Chip löschen
-
-```bash
-pyocd erase -t nrf52833 --chip
-```
-
-### Bestimmten Adressbereich löschen
-
-```bash
-# Bereich von 0x0 bis 0x10000 löschen
-pyocd erase -t nrf52833 --sector 0x0 0x10000
-```
-
-### Mass Erase (auch geschützten Flash)
-
-```bash
-pyocd erase -t nrf52833 --mass
-```
-
-## Flash-Geschwindigkeit
-
-### SWD-Frequenz anpassen
-
-```bash
-# Höhere Frequenz für schnelleres Flashen (bis zu 4 MHz)
-pyocd flash -t nrf52833 -f 4000000 firmware.hex
-
-# Niedrigere Frequenz bei Verbindungsproblemen
-pyocd flash -t nrf52833 -f 500000 firmware.hex
-```
-
-## Reset nach dem Flashen
-
-### Automatischer Reset (Standard)
-
-```bash
-pyocd flash -t nrf52833 firmware.hex
-# Reset erfolgt automatisch nach erfolgreichem Flash
-```
-
-### Reset überspringen
-
-```bash
-pyocd flash -t nrf52833 --no-reset firmware.hex
-```
-
-### Manueller Reset
-
-```bash
-pyocd reset -t nrf52833
-```
-
-## Mehrere Geräte
-
-### Bestimmtes Gerät auswählen
-
-```bash
-# Unique ID anzeigen
-pyocd list --probes
-
-# Mit Unique ID flashen
-pyocd flash -t nrf52833 -u 99039000... firmware.hex
-```
-
-### Alle angeschlossenen Geräte flashen
-
-```bash
-#!/bin/bash
-for probe in $(pyocd list --probes --format=json | jq -r '.[].unique_id'); do
-    echo "Flashing $probe..."
-    pyocd flash -t nrf52833 -u "$probe" firmware.hex
-done
-```
-
-## MCUboot + Anwendung Flashen
-
-Wenn MCUboot als Bootloader verwendet wird, müssen **zwei Images** in der richtigen Reihenfolge geflasht werden:
-
-### Flashing-Reihenfolge
+#### Vollständiger Flash (Initial)
 
 ```bash
 # 1. Chip vollständig löschen
 pyocd erase -t nrf52833 --chip
 
-# 2. MCUboot Bootloader flashen (Adresse 0x0)
-pyocd flash -t nrf52833 -f 1000000 build/mcuboot/zephyr/zephyr.hex
+# 2. Bootloader flashen (0x0)
+pyocd flash -t nrf52833 build/bootloader/zephyr.hex
 
-# 3. Signierte Anwendung flashen (Adresse 0xC000 = MCUboot Slot 0)
-pyocd flash -t nrf52833 -f 1000000 build/firmware/zephyr/zephyr.signed.hex
+# 3. App flashen (0x2000 = Slot A)
+pyocd flash -t nrf52833 build/app/zephyr.hex
 
-# 4. Gerät zurücksetzen
+# 4. Reset
 pyocd reset -t nrf52833
 ```
 
-### Warum diese Reihenfolge?
-
-| Schritt | Grund |
-|---------|-------|
-| Chip Erase | Stellt sicher, dass kein alter Code Konflikte verursacht |
-| MCUboot zuerst | Bootloader muss an Adresse 0x0 liegen |
-| Signierte App | MCUboot validiert die Signatur beim Boot |
-| Reset | Startet MCUboot, der dann die App lädt |
-
-### Nur Anwendung aktualisieren
-
-Wenn MCUboot bereits geflasht ist:
+#### Nur App aktualisieren (Settings behalten)
 
 ```bash
-# Nur die neue Anwendung flashen
-pyocd flash -t nrf52833 -f 1000000 build/firmware/zephyr/zephyr.signed.hex
+# Nur Slot A überschreiben (0x2000 - 0x3F000)
+pyocd flash -t nrf52833 --erase sector build/app/zephyr.hex
 pyocd reset -t nrf52833
 ```
 
-### Build-Script
+**Hinweis:** Bei Sektor-Erase bleiben Settings (0x7E000+) erhalten!
 
-Für automatisiertes Build & Flash:
+---
+
+## Grundlegende Flash-Befehle
+
+### HEX-Datei flashen
 
 ```bash
-# Im Firmware-Verzeichnis
-./build_flash.sh          # Nur bauen
-./build_flash.sh flash    # Bauen und flashen (MCUboot + App)
-./build_flash.sh flash-app # Nur App flashen
-./build_flash.sh ble      # OTA Update via Bluetooth
-./build_flash.sh clean    # Build-Verzeichnis löschen
+pyocd flash -t nrf52833 firmware.hex
+```
+
+### BIN-Datei flashen (mit Adresse)
+
+```bash
+# Flash ab Slot A (0x2000)
+pyocd flash -t nrf52833 -a 0x2000 firmware.bin
+```
+
+### Erase-Modi
+
+| Modus | Befehl | Effekt |
+|-------|--------|--------|
+| Sektor | `--erase sector` | Nur betroffene Sektoren (Default) |
+| Chip | `--erase chip` | Kompletter Flash **inkl. Settings!** |
+| Keiner | `--erase none` | Nichts löschen |
+
+```bash
+# Settings behalten:
+pyocd flash -t nrf52833 --erase sector firmware.hex
+
+# Alles löschen:
+pyocd flash -t nrf52833 --erase chip firmware.hex
 ```
 
 ---
 
-## nRF52833 Flash-Speicher Layout
+## Datensicherheit
 
-| Bereich | Adresse | Größe | Beschreibung |
-|---------|---------|-------|--------------|
-| Flash Start | 0x00000000 | - | Beginn des Flash |
-| Application | 0x00000000 | 512 KB | Anwendungsspeicher |
-| Flash Ende | 0x00080000 | - | Ende des 512 KB Flash |
-| UICR | 0x10001000 | 4 KB | User Information Config |
+| Methode | Bootloader | App | Settings |
+|---------|------------|-----|----------|
+| `./build_flash.sh flash` | ✅ Neu | ✅ Neu | ❌ GELÖSCHT |
+| `./build_flash.sh flash-app` | Unverändert | ✅ Neu | ✅ Erhalten |
+| `./build_flash.sh ota` | Unverändert | ✅ Neu | ✅ Erhalten |
+| `pyocd --erase chip` | ❌ Gelöscht | ❌ Gelöscht | ❌ GELÖSCHT |
+| `pyocd --erase sector` | Unverändert | ✅ Neu | ✅ Erhalten |
 
-### UICR programmieren
+**Empfehlung:** Nach initialem `flash` immer `ota` oder `flash-app` verwenden!
+
+---
+
+## Verifikation
 
 ```bash
-# UICR-Bereich flashen
-pyocd flash -t nrf52833 -a 0x10001000 uicr.bin
+# Nach dem Flashen verifizieren
+pyocd flash -t nrf52833 --verify firmware.hex
 ```
+
+---
+
+## Reset
+
+```bash
+# Manueller Reset
+pyocd reset -t nrf52833
+
+# Halt (für Debugging)
+pyocd commander -t nrf52833 -c "halt"
+```
+
+---
 
 ## Troubleshooting
 
 ### "No connected debug probes"
 
 ```bash
-# USB-Verbindung prüfen
 ls /dev/cu.usbmodem*
-
-# Probe-Liste aktualisieren
 pyocd list --probes
 ```
 
-### "Target not halted" oder "Flash write failed"
+### "Flash write failed"
 
 ```bash
-# 1. Chip vollständig löschen
+# Chip löschen und neu flashen
 pyocd erase -t nrf52833 --chip
-
-# 2. Mit niedrigerer Frequenz flashen
-pyocd flash -t nrf52833 -f 1000000 firmware.hex
+pyocd flash -t nrf52833 firmware.hex
 ```
 
 ### "Flash verification failed"
 
 ```bash
-# Mass Erase und erneut flashen
 pyocd erase -t nrf52833 --mass
 pyocd flash -t nrf52833 --verify firmware.hex
 ```
 
-### "Could not find pack for target"
+### Langsames Flashen
 
 ```bash
-# Target Pack installieren
-pyocd pack install nrf52833
-
-# Alternativ: Built-in Target verwenden
-pyocd flash -t nrf52 firmware.hex
+# Höhere SWD-Frequenz (bis 4 MHz)
+pyocd flash -t nrf52833 -f 4000000 firmware.hex
 ```
 
-### Timeout beim Flashen
-
-```bash
-# Längeren Timeout setzen (in Sekunden)
-pyocd flash -t nrf52833 --timeout 60 firmware.hex
-```
-
-## Automatisierungs-Script
-
-```bash
-#!/bin/bash
-# flash-microbit.sh - Automatisiertes Flashen mit Fehlerbehandlung
-
-HEX_FILE="$1"
-TARGET="nrf52833"
-
-if [ -z "$HEX_FILE" ]; then
-    echo "Usage: $0 <firmware.hex>"
-    exit 1
-fi
-
-if [ ! -f "$HEX_FILE" ]; then
-    echo "Error: File not found: $HEX_FILE"
-    exit 1
-fi
-
-echo "Checking connection..."
-if ! pyocd list --probes | grep -q "micro:bit"; then
-    echo "Error: No micro:bit found. Check USB connection."
-    exit 1
-fi
-
-echo "Erasing chip..."
-pyocd erase -t "$TARGET" --chip || exit 1
-
-echo "Flashing $HEX_FILE..."
-pyocd flash -t "$TARGET" --verify "$HEX_FILE" || exit 1
-
-echo "Flash successful!"
-```
-
-## Python API Beispiel
-
-```python
-#!/usr/bin/env python3
-"""Programmatisches Flashen mit pyOCD"""
-
-from pyocd.core.helpers import ConnectHelper
-from pyocd.flash.file_programmer import FileProgrammer
-
-def flash_microbit(hex_file: str) -> bool:
-    """Flash HEX file to micro:bit v2."""
-    try:
-        with ConnectHelper.session_with_chosen_probe(
-            target_override='nrf52833'
-        ) as session:
-            board = session.board
-            target = board.target
-
-            # Chip löschen
-            target.mass_erase()
-
-            # Flashen
-            FileProgrammer(session).program(hex_file)
-
-            # Reset
-            target.reset()
-
-            print(f"Successfully flashed {hex_file}")
-            return True
-
-    except Exception as e:
-        print(f"Flash failed: {e}")
-        return False
-
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) != 2:
-        print("Usage: python flash.py <firmware.hex>")
-        sys.exit(1)
-
-    success = flash_microbit(sys.argv[1])
-    sys.exit(0 if success else 1)
-```
-
-## Vergleich: pyOCD vs Alternativen
-
-| Feature | pyOCD | OpenOCD | nrfjprog |
-|---------|-------|---------|----------|
-| Installation | `pip install` | System-Paket | Nordic-Download |
-| Plattformen | Win/Mac/Linux | Win/Mac/Linux | Win/Mac/Linux |
-| Python API | Ja | Nein | Nein |
-| CMSIS-DAP | Ja | Ja | Nein (J-Link) |
-| Geschwindigkeit | Mittel | Mittel | Schnell |
-| micro:bit Support | Exzellent | Gut | Gut |
+---
 
 ## Referenzen
 
@@ -401,5 +207,4 @@ if __name__ == "__main__":
 |-----------|-----|
 | pyOCD Dokumentation | https://pyocd.io/docs |
 | pyOCD GitHub | https://github.com/pyocd/pyOCD |
-| pyOCD Target Packs | https://pyocd.io/docs/packs |
 | nRF52833 Datasheet | https://infocenter.nordicsemi.com/pdf/nRF52833_PS_v1.5.pdf |

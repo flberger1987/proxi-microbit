@@ -1,198 +1,193 @@
-# DAPLink und Bootloader für micro:bit v2
+# Bootloader-Architektur
 
 ## Übersicht
 
-Der micro:bit verwendet DAPLink als Interface-Firmware auf dem separaten Interface-Chip. Dies ermöglicht:
-- Drag & Drop Programmierung (USB Mass Storage)
-- CMSIS-DAP Debugging
-- Serielle Konsole (CDC)
+Das ProxiMicro-Projekt verwendet ein **eigenes Boot-Pointer OTA System** anstelle von MCUboot. Dies ermöglicht:
+- Kabellose Firmware-Updates via BLE
+- Sofortiges Slot-Switching ohne Kopieren
+- Automatischer Fallback bei Boot-Fehlern
+- Persistente Settings (Kalibrierung, PID, BLE-Bonds)
 
-## Offizielle Dokumentation
+---
 
-- **DAPLink Interface**: https://tech.microbit.org/software/daplink-interface/
-- **DAPLink Releases**: https://github.com/ARMmbed/DAPLink/releases
-- **UF2 Bootloader**: https://github.com/makerdiary/uf2-bootloader
+## DAPLink (Interface-Chip)
 
-## DAPLink Architektur
+Der micro:bit hat einen separaten Interface-Chip mit DAPLink-Firmware:
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                    Interface MCU                            │
-│                  (nRF52833 oder KL27)                       │
-│                                                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-│  │ Mass Storage│  │  CMSIS-DAP  │  │   CDC Serial        │ │
-│  │  (DAPLINK)  │  │  (Debug)    │  │   (Console)         │ │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
-│         │                │                   │              │
-│         └────────────────┼───────────────────┘              │
-│                          │                                  │
-│                     USB Stack                               │
-└──────────────────────────┼──────────────────────────────────┘
-                           │
-                         USB-C
+┌──────────────────────────────────────────────────────────────┐
+│                    Interface MCU                              │
+│                  (nRF52833 oder nRF52820)                     │
+│                                                               │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐   │
+│  │ Mass Storage│  │  CMSIS-DAP  │  │   CDC Serial        │   │
+│  │  (MICROBIT) │  │  (Debug)    │  │   (Console)         │   │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-## Standard Programmierablauf
+**Funktionen:**
+- **Drag & Drop**: `.hex` auf MICROBIT-Laufwerk kopieren
+- **CMSIS-DAP**: Debugging via pyOCD/OpenOCD
+- **CDC Serial**: USB-Konsole (115200 Baud)
 
-1. micro:bit über USB verbinden
-2. Erscheint als `MICROBIT` Laufwerk
-3. `.hex` Datei auf Laufwerk kopieren
-4. DAPLink flasht automatisch den Main MCU
-5. Programm startet
+---
 
-## DAPLink Firmware Update
+## ProxiMicro Boot-Pointer System
 
-### Für V2.00 (KL27 Interface)
+### Flash-Layout (512KB nRF52833)
 
-#### Maintenance Mode betreten
+```
+0x00000 ┌─────────────────────┐
+        │ Mini-Bootloader     │  8 KB
+        │ (Boot-Pointer)      │
+0x02000 ├─────────────────────┤
+        │                     │
+        │ Slot A (Primary)    │  244 KB
+        │                     │
+0x3F000 ├─────────────────────┤
+        │                     │
+        │ Slot B (Secondary)  │  244 KB
+        │                     │
+0x7C000 ├─────────────────────┤
+        │ Boot Control Block  │  4 KB
+0x7D000 ├─────────────────────┤
+        │ OTA State           │  4 KB
+0x7E000 ├─────────────────────┤
+        │ Settings (NVS)      │  8 KB
+        │ - Mag Kalibrierung  │
+        │ - PID Parameter     │
+        │ - BLE Bonds         │
+0x80000 └─────────────────────┘
+```
 
-1. **RESET-Taste gedrückt halten** während USB anschließen
-2. Laufwerk erscheint als `MAINTENANCE`
-3. Neue DAPLink Firmware (`.hex`) auf Laufwerk kopieren
+### Boot-Entscheidung
 
-#### Vollständiges Update via blhost
+Der Mini-Bootloader (8KB) führt beim Start folgende Prüfungen durch:
 
-Für tiefere Updates kann das NXP Bootloader Host Tool verwendet werden:
+```
+1. Boot Control Block lesen & validieren
+2. CRC32 beider Slots prüfen
+3. Slot wählen:
+   ├─ Beide gültig → Höhere Build-Nummer
+   ├─ Nur einer gültig → Diesen verwenden
+   └─ Keiner gültig → Fallback zu Slot A
+4. boot_count prüfen:
+   └─ ≥3 → Auf anderen Slot wechseln (wenn gültig)
+5. boot_count inkrementieren
+6. Vector Table validieren
+7. Zu Firmware springen
+```
+
+### Boot Control Block
+
+```c
+struct boot_control {
+    uint32_t magic;           /* 0xB007F1E0 */
+    uint8_t  version;         /* Struktur-Version (2) */
+    uint8_t  active_slot;     /* 0 = Slot A, 1 = Slot B */
+    uint8_t  slot_a_valid;    /* CRC OK */
+    uint8_t  slot_b_valid;    /* CRC OK */
+    uint8_t  boot_count;      /* Fallback-Zähler (≥3 → Rollback) */
+    uint8_t  fallback_reason; /* Diagnostik */
+    uint32_t slot_a_crc;      /* CRC32 Slot A */
+    uint32_t slot_b_crc;      /* CRC32 Slot B */
+    uint32_t slot_a_size;     /* Firmware-Größe */
+    uint32_t slot_b_size;
+    uint32_t slot_a_version;  /* Build-Nummer */
+    uint32_t slot_b_version;
+    uint32_t checksum;        /* Block-CRC32 */
+};
+```
+
+### Fallback-Mechanismus
+
+| boot_count | Aktion |
+|------------|--------|
+| 0 | Normaler Boot, Firmware ruft `confirm_boot()` |
+| 1-2 | Boot-Versuch, wartet auf `confirm_boot()` |
+| ≥3 | **Automatischer Rollback** zum anderen Slot |
+
+**Erfolgreicher Boot:** Firmware ruft `boot_control_confirm_boot()` → setzt boot_count auf 0.
+
+---
+
+## BLE OTA Update
+
+### Protokoll
+
+Updates erfolgen über **Nordic UART Service (NUS)** mit eigenem Paketformat.
+
+```
+┌────────┬─────────┬──────────────────────────┐
+│ Magic  │ Command │ Payload                  │
+│ 0xF0   │ 1 Byte  │ variabel                 │
+└────────┴─────────┴──────────────────────────┘
+```
+
+### OTA State Machine
+
+```
+IDLE ──► ERASE ──► TRANSFER ──► VALIDATE ──► COMMIT ──► REBOOT
+                       │              │
+                       └── SUSPENDED ─┘ (bei Disconnect)
+```
+
+### Update-Ablauf
+
+1. **INIT**: Host sendet Firmware-Größe + CRC32 + Version
+2. **ERASE**: Ziel-Slot page-weise löschen
+3. **TRANSFER**: 224-Byte Blöcke mit CRC16
+4. **VALIDATE**: Gesamte Firmware CRC32 prüfen
+5. **COMMIT**: Boot-Pointer umschalten
+6. **REBOOT**: Neustart in neue Firmware
+
+### Resume-Fähigkeit
+
+Bei Verbindungsabbruch:
+1. Transfer wechselt zu SUSPENDED
+2. Host reconnectet, sendet QUERY
+3. Device antwortet mit letztem Block
+4. Host setzt Transfer fort
+
+---
+
+## Flash-Methoden
+
+### Initial (einmalig)
 
 ```bash
-# 1. TP1 mit GND verbinden während USB anschließen
-#    (aktiviert KL27 internen Bootloader)
-
-# 2. Zuerst nRF52 Flash löschen (wichtig!)
-# Kopiere erase-flash.hex auf MICROBIT Laufwerk
-
-# 3. blhost verwenden (von NXP herunterladen)
-blhost -u -- flash-erase-all
-blhost -u -- write-memory 0x0 daplink_full.bin
+./build_flash.sh flash   # Bootloader + App + Settings löschen
 ```
 
-### Für V2.2x (nRF52 Interface)
-
-Die V2.2x Versionen verwenden denselben nRF52-Chip für Interface und können über Maintenance Mode aktualisiert werden.
-
-## Alternative: UF2 Bootloader
-
-UF2 (USB Flashing Format) ist ein alternatives Bootloader-Format, das besonders benutzerfreundlich ist.
-
-### Vorteile von UF2
-
-- Einfache Dateiformat-Konvertierung
-- Schnelleres Flashen
-- Bessere Fehlerbehandlung
-- Weit verbreitet (Adafruit, Raspberry Pi Pico, etc.)
-
-### UF2 für nRF52833
+### Updates (empfohlen)
 
 ```bash
-# UF2 Bootloader Repository
-git clone https://github.com/makerdiary/uf2-bootloader
-
-# Build für nRF52833
-cd uf2-bootloader
-make BOARD=pca10100  # nRF52833-DK, ähnlich zum micro:bit
+./build_flash.sh ota     # Via BLE, behält alles
 ```
 
-### UF2 Datei erstellen
+### USB ohne Settings-Verlust
 
 ```bash
-# Aus HEX-Datei
-python uf2conv.py firmware.hex --family 0xADA52840 -o firmware.uf2
-
-# Aus BIN-Datei (Adresse angeben!)
-python uf2conv.py firmware.bin -b 0x27000 --family 0xADA52840 -o firmware.uf2
+./build_flash.sh flash-app   # Nur App, Settings bleiben
 ```
 
-### UF2 Bootloader flashen
+---
 
-**Achtung**: Dies ersetzt den originalen DAPLink Bootloader!
-
-```bash
-# Über pyOCD
-pyocd flash -t nrf52833 uf2_bootloader.hex
-
-# Oder über bestehenden DAPLink
-# (Kopiere HEX auf MICROBIT Laufwerk)
-```
-
-### UF2 Modus aktivieren
-
-Nach Installation des UF2 Bootloaders:
-- **Doppelklick auf RESET** innerhalb 500ms
-- Laufwerk erscheint als `BOOT`
-- `.uf2` Dateien kopieren
-
-## Kommandozeilen-Flashen
-
-### Mit pyOCD
-
-```bash
-# HEX flashen
-pyocd flash -t nrf52833 firmware.hex
-
-# Mit vollständigem Chip Erase
-pyocd flash -t nrf52833 --erase chip firmware.hex
-
-# Nur bestimmten Bereich
-pyocd flash -t nrf52833 -a 0x27000 firmware.bin
-```
-
-### Mit nrfjprog (Nordic Tool)
-
-```bash
-# Installation
-# macOS: brew install nordicsemi/nrf/nrf-command-line-tools
-
-# Chip löschen
-nrfjprog --eraseall -f nrf52
-
-# Firmware flashen
-nrfjprog --program firmware.hex -f nrf52
-
-# Reset
-nrfjprog --reset -f nrf52
-```
-
-### Mit OpenOCD
-
-```bash
-openocd -f interface/cmsis-dap.cfg -f target/nrf52.cfg \
-        -c "program firmware.hex verify reset exit"
-```
-
-## TinyGo Flashen
-
-```bash
-# Standard (nutzt DAPLink automatisch)
-tinygo flash -target=microbit-v2 main.go
-
-# Mit SoftDevice (via OpenOCD)
-tinygo flash -target=microbit-s110v8 -programmer=cmsis-dap main.go
-```
-
-## Bootloader Recovery
+## Maintenance Mode (DAPLink)
 
 Falls der Bootloader beschädigt ist:
 
-### Option 1: Maintenance Mode (wenn noch funktioniert)
+1. **RESET-Taste gedrückt halten** während USB anschließen
+2. Laufwerk erscheint als **MAINTENANCE**
+3. DAPLink-Firmware via Drag & Drop reparieren
 
-1. RESET gedrückt halten + USB anschließen
-2. Auf `MAINTENANCE` neue Firmware kopieren
-
-### Option 2: Externer SWD-Debugger
-
-Falls Maintenance Mode nicht mehr funktioniert, wird ein externer Debugger benötigt:
-- J-Link
-- ST-Link
-- Raspberry Pi + OpenOCD
-
-Verbindung über SWD Pads auf der Rückseite des micro:bit.
+---
 
 ## Referenzen
 
 | Ressource | URL |
 |-----------|-----|
-| DAPLink GitHub | https://github.com/ARMmbed/DAPLink |
-| micro:bit DAPLink | https://tech.microbit.org/software/daplink-interface/ |
-| UF2 Spec | https://github.com/microsoft/uf2 |
+| DAPLink Interface | https://tech.microbit.org/software/daplink-interface/ |
+| micro:bit Tech Site | https://tech.microbit.org/ |
 | pyOCD | https://pyocd.io/ |

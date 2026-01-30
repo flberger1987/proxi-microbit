@@ -2,47 +2,29 @@
 
 ## Übersicht
 
-Der Kosmos Proxi (Art.Nr. 620585) ist ein **Hexapod** (6-Bein-Roboter), der mit dem BBC micro:bit gesteuert wird. Er kann vorwärts/rückwärts gehen und sich um seine Achse drehen.
-
-## Offizielle Quellen
+Der Kosmos Proxi (Art.Nr. 620585) ist ein **Hexapod** (6-Bein-Roboter), der mit dem BBC micro:bit gesteuert wird.
 
 - **Produktseite**: https://www.kosmos.de/de/proxi_1620585_4002051620585
-- **Weitere Informationen**: https://www.kosmos.de/de/content/Microsites/Science/KOSMOS%20Proxi%20-%20Weitere%20Produktinformationen
-- **Anleitung (ManualsLib)**: https://www.manualslib.de/manual/1525570/Kosmos-Proxi.html
-- **Kundenservice**: service@kosmos.de
+- **Anleitung**: https://www.manualslib.de/manual/1525570/Kosmos-Proxi.html
+
+---
 
 ## Hardware-Komponenten
 
-### micro:bit Platine (inkludiert)
-- Programmierbarer Microcontroller mit eigenem Speicher
-- Bluetooth
-- Beschleunigungssensor
-- Kompass
-- 2 programmierbare Tasten
-- 5x5-LED-Display (auch als Lichtsensor nutzbar)
-- Temperatur-Sensor (Prozessor-basiert)
-- Pins zur Ausgabe und Eingabe von Signalen
-
 ### Proxi Zusatzplatine
-Die Proxi Zusatzplatine erweitert den micro:bit um roboterspezifische Funktionen:
 
 | Komponente | Funktion |
 |------------|----------|
 | Edge Connector | Aufnahme für micro:bit |
-| Infrarot-Sensoren | Hinderniserkennung, Linienfolgen |
-| Buzzer | Akustische Ausgabe |
-| Batteriefach-Anschluss | Stromversorgung |
-| Motor-Treiber | Steuerung der Hexapod-Motoren |
+| IR-Sensoren (2×) | Hinderniserkennung |
+| Motor-Treiber | H-Brücke für 2 Motoren |
+| Batteriefach-Anschluss | 4× AA (6V) |
 
-## Schaltplan
+---
 
-**Hinweis**: Kein öffentlicher Schaltplan verfügbar. Pin-Belegung wurde durch Reverse Engineering ermittelt.
+## Pin-Zuordnung (Verifiziert 2026-01-25)
 
-## Pin-Zuordnung (Verifiziert 2025-01-25)
-
-Der Proxi verwendet **zwei Motoren** mit H-Brücken-Steuerung:
-
-### Motor-Pins
+### Motor-Pins (H-Brücke)
 
 | micro:bit Pin | nRF GPIO | Funktion |
 |---------------|----------|----------|
@@ -51,49 +33,92 @@ Der Proxi verwendet **zwei Motoren** mit H-Brücken-Steuerung:
 | P15 | P0.13 | Dreh-Motor: Links |
 | P16 | P1.02 | Dreh-Motor: Rechts |
 
-### H-Brücken-Logik
+**H-Brücken-Logik:**
+- Vorwärts: P13=PWM, P14=LOW
+- Rückwärts: P13=LOW, P14=PWM
+- **Niemals beide HIGH!** (Kurzschluss)
 
-**Geh-Motor (P13/P14):**
-- Vorwärts: P13=HIGH, P14=LOW
-- Rückwärts: P13=LOW, P14=HIGH
-- Stopp: P13=LOW, P14=LOW
+### IR-Sensor-Pins
 
-**Dreh-Motor (P15/P16):**
-- Links drehen: P15=HIGH, P16=LOW
-- Rechts drehen: P15=LOW, P16=HIGH
-- Stopp: P15=LOW, P16=LOW
+| micro:bit Pin | nRF GPIO | Funktion |
+|---------------|----------|----------|
+| P0 | P0.02 (AIN0) | IR Sensor Links |
+| P1 | P0.03 (AIN1) | IR Sensor Rechts |
+| P12 | P0.12 | IR LED Enable (Active-HIGH) |
 
-**WARNUNG**: Niemals beide Pins einer H-Brücke gleichzeitig HIGH setzen!
+---
 
-### IR-Sensor-Pins (Verifiziert 2025-01-25)
+## IR-Sensor Signalverarbeitung
 
-| micro:bit Pin | nRF GPIO | ADC | Funktion |
-|---------------|----------|-----|----------|
-| P0 | P0.02 | AIN0 | IR Sensor Links |
-| P1 | P0.03 | AIN1 | IR Sensor Rechts |
-| P12 | P0.12 | GPIO | IR LED Enable (Active-HIGH) |
-| P19/20 | - | - | I2C (LSM303AGR) |
+### Messprinzip
 
-**Messprinzip:**
-1. Messe ADC mit IR-LEDs AUS (Ambient-Licht)
-2. Schalte IR-LEDs EIN (P12=HIGH)
-3. Messe ADC mit IR-LEDs AN (Reflection)
-4. Differenz = tatsächlicher IR-Wert (eliminiert Fremdlicht)
+Die IR-Sensoren messen reflektiertes Infrarot-Licht zur Hinderniserkennung.
 
-## Standard-Programmierung
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    IR-SIGNALKETTE                            │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  1. DIFFERENZMESSUNG (Fremdlicht-Eliminierung)              │
+│     ├─ ADC mit IR-LEDs AUS → ambient                        │
+│     ├─ ADC mit IR-LEDs AN  → reflection                     │
+│     └─ ir_raw = reflection - ambient                        │
+│                                                              │
+│  2. LOW-PASS FILTER (10Hz Cutoff, IIR 1. Ordnung)           │
+│     └─ ir_filt = 0.77×ir_raw + 0.23×ir_filt_prev            │
+│                                                              │
+│  3. BIAS-KOMPENSATION (Startup-Kalibrierung)                │
+│     └─ ir = ir_filt - bias  (bei Start 20 Samples mitteln)  │
+│                                                              │
+│  4. ADC → DISTANZ (Lookup-Tabelle + Interpolation)          │
+│     │   ADC    │  Distanz                                   │
+│     │   100    │  550 mm                                    │
+│     │   350    │  350 mm                                    │
+│     │  1050    │  250 mm                                    │
+│     │  3000    │  180 mm                                    │
+│     │  4000    │  100 mm                                    │
+│                                                              │
+│  5. 1D KALMAN FILTER (Glättung)                             │
+│     └─ Q=100mm², R=400mm² → stabile Distanzschätzung        │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
 
-Die offizielle Programmierung erfolgt über:
-- **MakeCode** (Block-basiert): https://makecode.microbit.org/
-- **MakeCode Python**
-- **micro:bit Classroom**
+### ADC-Konfiguration
 
-## Erweiterte Programmierung
+| Parameter | Wert |
+|-----------|------|
+| Auflösung | 12-bit (0-4095) |
+| Gain | 4× (0-0.15V Bereich) |
+| Referenz | Internal 0.6V |
+| Oversampling | 16× Hardware |
 
-Für fortgeschrittene Anwendungen siehe:
-- `docs/software/zephyr-rtos.md` - Zephyr RTOS Setup
-- `docs/software/codal-sdk.md` - CODAL SDK für C++
+### Kalman-Filter Parameter
+
+```c
+#define KALMAN_Q_DISTANCE   100.0f   /* Prozessrauschen (mm²) */
+#define KALMAN_R_DISTANCE   400.0f   /* Messrauschen (mm²) */
+```
+
+**Modell:** Konstante Position (Hindernisse bewegen sich langsam)
+```
+d[k+1] = d[k]           /* Prädiktion */
+z = raw_to_mm(adc)      /* Messung */
+```
+
+---
 
 ## Stromversorgung
 
-- 4x AA Batterien (6V) im Batteriefach
-- Alternativ: USB über micro:bit (nur für Programmierung, nicht für Motoren)
+- **4× AA Batterien** (6V) im Batteriefach
+- USB über micro:bit nur für Programmierung (nicht für Motoren)
+
+---
+
+## Erweiterte Programmierung
+
+Dieses Projekt nutzt **Zephyr RTOS** statt der Standard-MakeCode-Programmierung:
+- Preemptive Threads für Motor, Sensoren, BLE
+- BLE Dual-Role (Controller + Debug/OTA)
+- Kalman-Filter für Sensorfusion
+- OTA-Updates via Bluetooth

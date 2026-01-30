@@ -12,6 +12,7 @@
 #include "autonomous_nav.h"
 #include "smp_bt.h"
 #include "ble_output.h"
+#include "ota_update.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
@@ -28,6 +29,7 @@
 
 K_THREAD_STACK_DEFINE(telemetry_stack, TELEMETRY_STACK_SIZE);
 static struct k_thread telemetry_thread_data;
+static k_tid_t telemetry_thread_id;
 
 /* ============================================================================
  * State Variables
@@ -206,6 +208,8 @@ static void telemetry_thread_fn(void *p1, void *p2, void *p3)
     printk("Telemetry thread started (20 Hz)\n");
 
     while (1) {
+        /* Note: Thread is suspended during OTA via k_thread_suspend() */
+
         /* Only send if enabled and NUS is connected with notifications */
         if (!telemetry_enabled || !smp_bt_is_connected() || !ble_output_is_enabled()) {
             k_msleep(TELEMETRY_INTERVAL_MS);
@@ -292,15 +296,20 @@ int telemetry_init(void)
 void telemetry_start_thread(void)
 {
     /* Create telemetry thread first */
-    k_thread_create(&telemetry_thread_data, telemetry_stack,
-                    K_THREAD_STACK_SIZEOF(telemetry_stack),
-                    telemetry_thread_fn, NULL, NULL, NULL,
-                    TELEMETRY_PRIORITY, 0, K_NO_WAIT);
-    k_thread_name_set(&telemetry_thread_data, "telemetry");
+    telemetry_thread_id = k_thread_create(&telemetry_thread_data, telemetry_stack,
+                                          K_THREAD_STACK_SIZEOF(telemetry_stack),
+                                          telemetry_thread_fn, NULL, NULL, NULL,
+                                          TELEMETRY_PRIORITY, 0, K_NO_WAIT);
+    k_thread_name_set(telemetry_thread_id, "telemetry");
 
     /* Discover threads after a delay (let all threads start and set their names) */
     k_msleep(200);
     discover_threads();
+}
+
+k_tid_t telemetry_get_thread_id(void)
+{
+    return telemetry_thread_id;
 }
 
 void telemetry_enable(bool enable)

@@ -120,32 +120,78 @@
 };
 
 /*
- * Custom partition layout for MCUboot swap-using-move (no scratch)
- * Gives 20KB more to each slot (220KB instead of 200KB)
+ * Custom partition layout for Boot-Pointer OTA System
  *
- * Layout:
- *   MCUboot:  0x00000 - 0x0C000 (48KB)
- *   slot0:    0x0C000 - 0x43000 (220KB)
- *   slot1:    0x43000 - 0x7A000 (220KB)
- *   storage:  0x7A000 - 0x80000 (24KB)
+ * Optimized Layout (nRF52833 512KB):
+ *   Mini-Bootloader:   0x00000 - 0x02000 (8KB)
+ *   Slot A (Primary):  0x02000 - 0x3F000 (244KB)
+ *   Slot B (Secondary):0x3F000 - 0x7C000 (244KB)
+ *   Boot Control Block:0x7C000 - 0x7D000 (4KB)
+ *   OTA State:         0x7D000 - 0x7E000 (4KB)
+ *   Settings/NVS:      0x7E000 - 0x80000 (8KB)
  *   Total: 512KB
  */
+/delete-node/ &boot_partition;
 /delete-node/ &slot0_partition;
 /delete-node/ &slot1_partition;
 /delete-node/ &scratch_partition;
+/delete-node/ &storage_partition;
+
+/*
+ * Code partition selection:
+ * - Default: Slot A (0x02000) for direct flash
+ * - OTA to Slot B: Build with -DTARGET_SLOT=B
+ *
+ * The build script queries active slot and builds for inactive slot.
+ */
+/ {
+    chosen {
+        /* Default to Slot A - overridden by Kconfig for Slot B builds */
+        zephyr,code-partition = &slot0_partition;
+    };
+};
 
 &flash0 {
     partitions {
-        slot0_partition: partition@c000 {
+        compatible = "fixed-partitions";
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        /* Mini-Bootloader: 8KB */
+        boot_partition: partition@0 {
+            label = "bootloader";
+            reg = <0x00000000 0x00002000>;
+            read-only;
+        };
+
+        /* Slot A - Primary firmware: 244KB */
+        slot0_partition: partition@2000 {
             label = "image-0";
-            reg = <0x0000C000 0x00037000>;  /* 220KB */
+            reg = <0x00002000 0x0003D000>;
         };
 
-        slot1_partition: partition@43000 {
+        /* Slot B - Secondary firmware: 244KB */
+        slot1_partition: partition@3f000 {
             label = "image-1";
-            reg = <0x00043000 0x00037000>;  /* 220KB */
+            reg = <0x0003F000 0x0003D000>;
         };
 
-        /* No scratch partition - using swap-using-move */
+        /* Boot Control Block: 4KB */
+        boot_control_partition: partition@7c000 {
+            label = "boot-control";
+            reg = <0x0007C000 0x00001000>;
+        };
+
+        /* OTA State: 4KB */
+        ota_state_partition: partition@7d000 {
+            label = "ota-state";
+            reg = <0x0007D000 0x00001000>;
+        };
+
+        /* Settings/NVS: 8KB */
+        storage_partition: partition@7e000 {
+            label = "storage";
+            reg = <0x0007E000 0x00002000>;
+        };
     };
 };

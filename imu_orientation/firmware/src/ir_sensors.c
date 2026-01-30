@@ -411,6 +411,8 @@ static void ir_thread_fn(void *p1, void *p2, void *p3)
     while (1) {
         k_msleep(IR_SAMPLE_INTERVAL_MS);
 
+        /* Note: Thread is suspended during OTA via k_thread_suspend() */
+
         /* Step 1: Read ADC with IR LEDs OFF (P12=LOW) */
         gpio_pin_set(gpio0_dev, IR_LED_PIN, 0);  /* OFF = LOW */
         k_usleep(100);  /* Settle time */
@@ -598,6 +600,11 @@ void ir_sensors_start_thread(void)
                                    IR_THREAD_PRIORITY, 0, K_NO_WAIT);
 
     k_thread_name_set(ir_thread_id, "ir_sensors");
+}
+
+k_tid_t ir_sensors_get_thread_id(void)
+{
+    return ir_thread_id;
 }
 
 void ir_sensors_get_raw(uint16_t *left_value, uint16_t *right_value)

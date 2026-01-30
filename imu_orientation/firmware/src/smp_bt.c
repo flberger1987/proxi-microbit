@@ -4,6 +4,7 @@
  */
 
 #include "smp_bt.h"
+#include "ota_update.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -78,6 +79,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
     ble_connected = true;
     printk("BLE: Dashboard connected\n");
 
+    /* Notify OTA subsystem of connection */
+    ota_on_connect();
+
     /* Restart advertising after 100ms to allow additional connections */
     k_work_schedule(&adv_restart_work, K_MSEC(100));
 }
@@ -93,6 +97,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     }
 
     printk("BLE: Dashboard disconnected (reason %u)\n", reason);
+
+    /* Notify OTA subsystem of disconnection (may suspend transfer) */
+    ota_on_disconnect();
 
     if (current_conn) {
         bt_conn_unref(current_conn);

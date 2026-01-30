@@ -22,8 +22,10 @@
 #include <zephyr/sys/time_units.h>
 #include <zephyr/input/input.h>
 #include <zephyr/display/mb_display.h>
+#include <string.h>
 
 #include "robot_state.h"
+#include "version.h"
 #include "sensors.h"
 #include "orientation.h"
 #include "serial_output.h"
@@ -38,6 +40,10 @@
 #include "autonomous_nav.h"
 #include "yaw_controller.h"
 #include "telemetry.h"
+#include "boot_control.h"
+
+/* Embedded version string for OTA tool detection */
+static const char fw_version_marker[] __attribute__((used)) = FW_VERSION_MARKER;
 
 /* ============================================================================
  * Display Animations
@@ -258,6 +264,20 @@ static const struct mb_image face_frown = MB_IMAGE(
     { 1, 0, 0, 0, 1 }
 );
 
+/* OTA download icon - arrow pointing down into box */
+static const struct mb_image img_ota_start = MB_IMAGE(
+    { 0, 0, 1, 0, 0 },
+    { 0, 0, 1, 0, 0 },
+    { 1, 0, 1, 0, 1 },
+    { 0, 1, 1, 1, 0 },
+    { 1, 1, 1, 1, 1 }
+);
+
+/* OTA progress tracking */
+static uint8_t ota_progress_percent = 0;
+static int64_t ota_blink_time = 0;
+static bool ota_blink_state = true;
+
 /* Arrow animation for autonomous mode (forward arrow) */
 static const struct mb_image arrow_animation[] = {
     /* Frame 1: Small arrow */
@@ -466,7 +486,57 @@ static void update_display_for_state(enum robot_state state)
         mb_display_image(disp, MB_DISPLAY_MODE_DEFAULT | MB_DISPLAY_FLAG_LOOP,
                          300, arrow_animation, ARRAY_SIZE(arrow_animation));
         break;
+
+    case ROBOT_STATE_OTA:
+        /* Show download icon initially - progress handled separately */
+        mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, SYS_FOREVER_MS,
+                         &img_ota_start, 1);
+        break;
     }
+}
+
+/**
+ * Update OTA progress display - 25 LEDs filling left-to-right, bottom-to-top
+ * Each LED = 4% progress (25 LEDs × 4% = 100%)
+ * First LED is already lit at 0%, last LED lights up at 96%.
+ */
+void ota_display_progress(uint8_t percent)
+{
+    if (robot_get_state() != ROBOT_STATE_OTA) return;
+
+    /* 25 LEDs = 4% per LED, first LED at 0% */
+    uint8_t filled_leds = (percent / 4) + 1;
+    if (filled_leds > 25) filled_leds = 25;
+
+    /* Build progress image - fill from bottom-left to top-right */
+    struct mb_image img = {{{0}}};
+    for (uint8_t led = 0; led < filled_leds; led++) {
+        /* Row: bottom (4) to top (0) */
+        uint8_t row = 4 - (led / 5);
+        /* Column: left (0) to right (4) */
+        uint8_t col = led % 5;
+        img.row[row] |= (1 << (4 - col));  /* Set LED bit */
+    }
+
+    mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, SYS_FOREVER_MS, &img, 1);
+}
+
+/**
+ * Show OTA success animation
+ */
+void ota_display_success(void)
+{
+    mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, 2000, &img_check, 1);
+    audio_play(SOUND_CONNECTED);  /* Success melody */
+}
+
+/**
+ * Show OTA error animation
+ */
+void ota_display_error(void)
+{
+    mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, 2000, &img_error, 1);
+    audio_play(SOUND_ERROR);
 }
 
 /* ============================================================================
@@ -785,11 +855,68 @@ int main(void)
     printk("Exit auto mode: Stick or trigger (manual override)\n");
     printk("Triggers: Yaw rate control (max 20 deg/s)\n\n");
 
+    /* Initialize boot control subsystem */
+    ret = boot_control_init();
+    if (ret != 0) {
+        printk("ERROR: Boot control init failed: %d\n", ret);
+        /* Continue anyway - not critical for operation */
+    }
+
+    /* Show firmware version and boot slot info */
+    printk("Firmware: %s (Slot %c)\n\n",
+           FW_VERSION,
+           boot_control_get_active_slot() == SLOT_A ? 'A' : 'B');
+
     /* Get display */
     disp = mb_display_get();
     if (disp == NULL) {
         printk("ERROR: Display not available\n");
         return -ENODEV;
+    }
+
+    /* Display firmware version as scrolling text */
+    {
+        /* fw_version_marker is "FWVER=1.0.0-ble.N" - skip the "FWVER=" prefix for display */
+        const char *ver_display = fw_version_marker + 6;  /* Skip "FWVER=" */
+        printk("Displaying version: %s (marker: %s)\n", ver_display, fw_version_marker);
+        /* Scroll version string across display (500ms per frame) */
+        mb_display_print(disp, MB_DISPLAY_MODE_SCROLL, 500, "%s", ver_display);
+        /* Wait for scroll to complete (~500ms per character + some extra) */
+        k_msleep(strlen(ver_display) * 500 + 1000);
+    }
+
+    /* Check for boot fallback condition */
+    {
+        uint8_t fallback = boot_control_get_fallback_reason();
+        if (fallback != BOOT_FALLBACK_NONE) {
+            const char *reason_str;
+            switch (fallback) {
+                case BOOT_FALLBACK_CRC_FAIL:
+                    reason_str = "CRC verification failed";
+                    break;
+                case BOOT_FALLBACK_VERSION:
+                    reason_str = "Using lower version";
+                    break;
+                case BOOT_FALLBACK_BOOT_COUNT:
+                    reason_str = "Too many boot failures";
+                    break;
+                default:
+                    reason_str = "Unknown";
+                    break;
+            }
+            printk("\n");
+            printk("!!! BOOT FALLBACK WARNING !!!\n");
+            printk("Reason: %s\n", reason_str);
+            printk("Running from fallback slot\n");
+            printk("\n");
+
+            /* Display error X for 2 seconds */
+            mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, 2000, &img_error, 1);
+            k_msleep(2000);
+
+            /* Play warning tone (will be initialized later, queue it) */
+            /* Note: Audio not yet initialized, warning will be visual + serial only */
+        }
     }
 
     /* Initialize sensors (IMU) */
@@ -882,6 +1009,14 @@ int main(void)
 
     printk("All threads started.\n");
 
+    /* Confirm successful boot (resets boot_count for fallback detection) */
+    ret = boot_control_confirm_boot();
+    if (ret == 0) {
+        printk("Boot confirmed successfully\n");
+    } else {
+        printk("WARNING: Boot confirmation failed (err %d)\n", ret);
+    }
+
     /* Show startup checkmark briefly */
     mb_display_image(disp, MB_DISPLAY_MODE_SINGLE, 1000, &img_check, 1);
     k_msleep(1000);
@@ -945,7 +1080,9 @@ int main(void)
 
         /* Update flashing emoji (if active) or normal display state */
         /* Skip display update during calibration (handled separately) */
-        if (!sensors_is_calibrating() && !update_emoji_flash()) {
+        /* Skip display update during OTA (handled by ota_display_progress) */
+        enum robot_state state = robot_get_state();
+        if (!sensors_is_calibrating() && state != ROBOT_STATE_OTA && !update_emoji_flash()) {
             /* Check proximity-based blinking (only when connected) */
             bool show_display = true;
             if (robot_is_controller_connected()) {
@@ -954,7 +1091,6 @@ int main(void)
 
             /* Update display based on robot state (only if not blanked by prox blink) */
             if (show_display) {
-                enum robot_state state = robot_get_state();
                 update_display_for_state(state);
             }
         }

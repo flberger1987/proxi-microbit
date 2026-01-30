@@ -282,6 +282,7 @@ static int cal_samples;
 
 K_THREAD_STACK_DEFINE(sensor_stack, SENSOR_STACK_SIZE);
 static struct k_thread sensor_thread_data;
+static k_tid_t sensor_thread_id;
 
 /* Message queue for orientation data */
 K_MSGQ_DEFINE(orientation_msgq, sizeof(struct sensor_msg), 10, 4);
@@ -488,6 +489,8 @@ static void sensor_thread_fn(void *p1, void *p2, void *p3)
     int ret;
 
     while (1) {
+        /* Note: Thread is suspended during OTA via k_thread_suspend() */
+
         /* Read accelerometer */
         ret = sensor_sample_fetch(accel_dev);
         if (ret < 0 && ret != -EBADMSG) {
@@ -707,11 +710,16 @@ static void sensor_thread_fn(void *p1, void *p2, void *p3)
 
 void sensors_start_thread(void)
 {
-    k_thread_create(&sensor_thread_data, sensor_stack,
-                    K_THREAD_STACK_SIZEOF(sensor_stack),
-                    sensor_thread_fn, NULL, NULL, NULL,
-                    SENSOR_PRIORITY, 0, K_NO_WAIT);
-    k_thread_name_set(&sensor_thread_data, "sensor");
+    sensor_thread_id = k_thread_create(&sensor_thread_data, sensor_stack,
+                                       K_THREAD_STACK_SIZEOF(sensor_stack),
+                                       sensor_thread_fn, NULL, NULL, NULL,
+                                       SENSOR_PRIORITY, 0, K_NO_WAIT);
+    k_thread_name_set(sensor_thread_id, "sensor");
+}
+
+k_tid_t sensors_get_thread_id(void)
+{
+    return sensor_thread_id;
 }
 
 void sensors_get_raw_accel(int16_t *ax, int16_t *ay, int16_t *az)

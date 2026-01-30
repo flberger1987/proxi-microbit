@@ -25,6 +25,7 @@ enum robot_state {
     ROBOT_STATE_PAIRING,    /* BLE scanning for controller */
     ROBOT_STATE_CONNECTED,  /* Controller connected, showing eyes */
     ROBOT_STATE_AUTONOMOUS, /* Autonomous navigation active */
+    ROBOT_STATE_OTA,        /* OTA update in progress */
 };
 
 /* ============================================================================
@@ -40,6 +41,8 @@ enum display_state {
     DISPLAY_EYES,       /* Glowing eyes (connected) */
     DISPLAY_ERROR,      /* X mark (error) */
     DISPLAY_CHECK,      /* Checkmark (success) */
+    DISPLAY_OTA_INIT,   /* OTA starting (download arrow) */
+    DISPLAY_OTA_PROGRESS, /* OTA in progress (filling dots) */
 };
 
 /* ============================================================================
@@ -176,5 +179,27 @@ void robot_set_state(enum robot_state state);
  * Check if Xbox controller is connected
  */
 bool robot_is_controller_connected(void);
+
+/* ============================================================================
+ * OTA Display Functions (defined in main.c)
+ * ============================================================================ */
+
+/**
+ * Update OTA progress display
+ * Shows progress bar with blinking current LED (2Hz)
+ *
+ * @param percent Progress 0-100
+ */
+void ota_display_progress(uint8_t percent);
+
+/**
+ * Show OTA success animation (checkmark + sound)
+ */
+void ota_display_success(void);
+
+/**
+ * Show OTA error animation (X mark + sound)
+ */
+void ota_display_error(void);
 
 #endif /* ROBOT_STATE_H */

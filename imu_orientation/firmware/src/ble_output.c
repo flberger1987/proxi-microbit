@@ -4,11 +4,14 @@
  */
 
 #include "ble_output.h"
+#include "version.h"
 #include "sensors.h"
 #include "smp_bt.h"
 #include "serial_output.h"
 #include "telemetry.h"
 #include "autonomous_nav.h"
+#include "ota_update.h"
+#include "boot_control.h"
 
 #include <stdlib.h>
 
@@ -21,9 +24,6 @@
 #include <string.h>
 #include <stdio.h>
 
-/* Firmware version */
-#define FW_VERSION "1.0.0-ble"
-
 /* Output thread configuration */
 #define BLE_OUTPUT_STACK_SIZE 1536
 #define BLE_OUTPUT_PRIORITY 7
@@ -34,6 +34,45 @@ static struct k_thread ble_output_thread_data;
 
 /* NUS notification state */
 static volatile bool nus_notifications_enabled;
+
+/* OTA work queue for async processing
+ * Priority 4 = higher than sensors(5), lower than BLE TX(7)
+ */
+#define OTA_WORKQ_PRIORITY  4
+#define OTA_WORKQ_STACK_SIZE 3072
+K_THREAD_STACK_DEFINE(ota_workq_stack, OTA_WORKQ_STACK_SIZE);
+static struct k_work_q ota_workq;
+
+/* Double-buffer (ping-pong) for OTA packets
+ * This prevents race conditions where a new packet overwrites
+ * the buffer before the previous one is processed.
+ */
+static struct k_work ota_work;
+static uint8_t ota_packet_buf[2][256];  /* Two buffers */
+static uint16_t ota_packet_len[2];
+static volatile uint8_t ota_write_idx;   /* Buffer being written by BLE callback */
+static volatile uint8_t ota_read_idx;    /* Buffer being read by work handler */
+static K_SEM_DEFINE(ota_buf_sem, 1, 1);  /* Semaphore to signal buffer ready */
+
+static void ota_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+
+    /* Process all pending buffers */
+    while (ota_packet_len[ota_read_idx] > 0) {
+        uint8_t idx = ota_read_idx;
+        uint16_t len = ota_packet_len[idx];
+
+        /* Process the packet (this may do flash writes) */
+        ota_process_packet(ota_packet_buf[idx], len);
+
+        /* Mark buffer as processed */
+        ota_packet_len[idx] = 0;
+
+        /* Move to next buffer */
+        ota_read_idx = (ota_read_idx + 1) % 2;
+    }
+}
 
 /* NUS callbacks */
 static void nus_notif_enabled(bool enabled, void *ctx)
@@ -52,6 +91,31 @@ static void nus_notif_enabled(bool enabled, void *ctx)
 static void nus_received(struct bt_conn *conn, const void *data, uint16_t len, void *ctx)
 {
     ARG_UNUSED(ctx);
+
+    const uint8_t *byte_data = (const uint8_t *)data;
+
+    /* Check for OTA packet (first byte is OTA_MAGIC) */
+    if (len > 0 && byte_data[0] == OTA_MAGIC) {
+        /* Use ping-pong buffer to avoid race conditions.
+         * Copy to write buffer and submit work. */
+        uint8_t idx = ota_write_idx;
+
+        /* Check if buffer is available (previous packet processed) */
+        if (ota_packet_len[idx] == 0 && len <= sizeof(ota_packet_buf[0])) {
+            memcpy(ota_packet_buf[idx], byte_data, len);
+            ota_packet_len[idx] = len;
+
+            /* Switch to other buffer for next packet */
+            ota_write_idx = (ota_write_idx + 1) % 2;
+
+            /* Submit work to process the packet */
+            k_work_submit_to_queue(&ota_workq, &ota_work);
+        } else {
+            /* Buffer busy - this shouldn't happen if Python waits for ACK */
+            printk("OTA: Buffer busy, dropping packet\n");
+        }
+        return;
+    }
 
     char cmd[80];  /* Increased for PID command with KD/DMAX (~60 bytes) */
 
@@ -83,11 +147,16 @@ static void nus_received(struct bt_conn *conn, const void *data, uint16_t len, v
             bt_nus_send(conn, "CAL:BUSY\r\n", 10);
         }
     } else if (strcmp(cmd, "VER") == 0 || strcmp(cmd, "ver") == 0) {
-        /* Send firmware version */
-        char ver_msg[32];
-        int ver_len = snprintf(ver_msg, sizeof(ver_msg), "VER:%s\r\n", FW_VERSION);
+        /* Send firmware version, slot, and boot info */
+        extern uint32_t boot_control_get_firmware_version(uint8_t slot);
+        char ver_msg[80];
+        uint8_t slot = boot_control_get_active_slot();
+        int ver_len = snprintf(ver_msg, sizeof(ver_msg),
+            "VER:%s,SLOT:%c,A:%u,B:%u\r\n",
+            FW_VERSION, slot == 0 ? 'A' : 'B',
+            boot_control_get_firmware_version(SLOT_A),
+            boot_control_get_firmware_version(SLOT_B));
         bt_nus_send(conn, ver_msg, ver_len);
-        printk("NUS: Version sent\n");
     } else if (strcmp(cmd, "IMU") == 0 || strcmp(cmd, "imu") == 0) {
         /* Toggle IMU streaming */
         bool enabled = !serial_output_is_imu_enabled();
@@ -190,6 +259,12 @@ static struct bt_nus_cb nus_callbacks = {
     .received = nus_received,
 };
 
+/* OTA BLE send callback */
+static int ota_ble_send(const uint8_t *data, uint16_t len)
+{
+    return bt_nus_send(NULL, data, len);
+}
+
 static void ble_output_thread_fn(void *p1, void *p2, void *p3)
 {
     ARG_UNUSED(p1);
@@ -244,12 +319,32 @@ int ble_output_init(void)
         return err;
     }
 
+    /* Initialize OTA subsystem and set BLE send callback */
+    err = ota_init();
+    if (err) {
+        printk("OTA: Init failed (err %d)\n", err);
+        /* Continue anyway - OTA just won't work */
+    } else {
+        ota_set_send_callback(ota_ble_send);
+        printk("OTA: Initialized with BLE send callback\n");
+    }
+
     printk("NUS: Callbacks registered\n");
     return 0;
 }
 
 void ble_output_start_thread(void)
 {
+    /* Initialize dedicated OTA work queue with HIGH priority */
+    k_work_queue_init(&ota_workq);
+    k_work_queue_start(&ota_workq, ota_workq_stack,
+                       K_THREAD_STACK_SIZEOF(ota_workq_stack),
+                       OTA_WORKQ_PRIORITY, NULL);
+    k_thread_name_set(&ota_workq.thread, "ota_workq");
+
+    /* Initialize OTA work item */
+    k_work_init(&ota_work, ota_work_handler);
+
     k_thread_create(&ble_output_thread_data, ble_output_stack,
                     K_THREAD_STACK_SIZEOF(ble_output_stack),
                     ble_output_thread_fn, NULL, NULL, NULL,

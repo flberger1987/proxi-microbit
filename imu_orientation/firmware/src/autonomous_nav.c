@@ -522,6 +522,8 @@ static void autonav_thread_fn(void *p1, void *p2, void *p3)
     while (1) {
         k_msleep(AUTONAV_UPDATE_INTERVAL_MS);
 
+        /* Note: Thread is suspended during OTA via k_thread_suspend() */
+
         /* Skip if disabled */
         if (!enabled || current_state == AUTONAV_DISABLED) {
             continue;
@@ -565,6 +567,11 @@ void autonav_start_thread(void)
                                         AUTONAV_THREAD_PRIORITY, 0, K_NO_WAIT);
 
     k_thread_name_set(autonav_thread_id, "autonav");
+}
+
+k_tid_t autonav_get_thread_id(void)
+{
+    return autonav_thread_id;
 }
 
 void autonav_enable(void)

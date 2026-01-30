@@ -5,6 +5,12 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
 project(imu_orientation)
 
+# Build number (auto-incremented by build_flash.sh)
+if(DEFINED BUILD_NUMBER)
+    target_compile_definitions(app PRIVATE BUILD_NUMBER=${BUILD_NUMBER})
+    message(STATUS "Build number: ${BUILD_NUMBER}")
+endif()
+
 target_sources(app PRIVATE
     # Core
     src/main.c
@@ -37,6 +43,10 @@ target_sources(app PRIVATE
 
     # Autonomous Navigation
     src/autonomous_nav.c
+
+    # OTA/Bootloader
+    src/boot_control.c
+    src/ota_update.c
 
     # Testing
     src/motor_test.c

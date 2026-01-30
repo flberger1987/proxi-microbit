@@ -26,6 +26,7 @@
 
 K_THREAD_STACK_DEFINE(motor_stack, MOTOR_STACK_SIZE);
 static struct k_thread motor_thread_data;
+static k_tid_t motor_thread_id;
 
 /*
  * PWM Motor Configuration via Device Tree
@@ -195,6 +196,8 @@ static void motor_thread_fn(void *p1, void *p2, void *p3)
     printk("Hexapod motor driver thread started (PWM)\n");
 
     while (1) {
+        /* Note: Thread is suspended during OTA via k_thread_suspend() */
+
         /* Check for new motor command */
         ret = k_msgq_get(&motor_cmd_q, &cmd, K_MSEC(20));
 
@@ -287,11 +290,16 @@ int motor_driver_init(void)
 
 void motor_driver_start_thread(void)
 {
-    k_thread_create(&motor_thread_data, motor_stack,
-                    K_THREAD_STACK_SIZEOF(motor_stack),
-                    motor_thread_fn, NULL, NULL, NULL,
-                    MOTOR_PRIORITY, 0, K_NO_WAIT);
-    k_thread_name_set(&motor_thread_data, "motor");
+    motor_thread_id = k_thread_create(&motor_thread_data, motor_stack,
+                                      K_THREAD_STACK_SIZEOF(motor_stack),
+                                      motor_thread_fn, NULL, NULL, NULL,
+                                      MOTOR_PRIORITY, 0, K_NO_WAIT);
+    k_thread_name_set(motor_thread_id, "motor");
+}
+
+k_tid_t motor_get_thread_id(void)
+{
+    return motor_thread_id;
 }
 
 void motor_set_speeds(int16_t left_percent, int16_t right_percent)

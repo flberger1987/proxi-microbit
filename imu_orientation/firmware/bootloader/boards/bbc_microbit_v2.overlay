@@ -1,0 +1,70 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Device Tree Overlay for Mini-Bootloader
+ *
+ * Optimized flash partitions for the dual-slot OTA system:
+ *   0x00000 - 0x02000: Bootloader (8KB) - this firmware
+ *   0x02000 - 0x3F000: Slot A (244KB)
+ *   0x3F000 - 0x7C000: Slot B (244KB)
+ *   0x7C000 - 0x7D000: Boot Control Block (4KB)
+ *   0x7D000 - 0x7E000: OTA State (4KB)
+ *   0x7E000 - 0x80000: Settings/NVS (8KB)
+ */
+
+/* Delete default partitions */
+/delete-node/ &boot_partition;
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+/delete-node/ &scratch_partition;
+/delete-node/ &storage_partition;
+
+&flash0 {
+    partitions {
+        compatible = "fixed-partitions";
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        /* Mini-Bootloader: 0x00000 - 0x02000 (8KB) */
+        boot_partition: partition@0 {
+            label = "bootloader";
+            reg = <0x00000000 0x00002000>;
+            read-only;
+        };
+
+        /* Slot A: 0x02000 - 0x3F000 (244KB) */
+        slot0_partition: partition@2000 {
+            label = "slot-a";
+            reg = <0x00002000 0x0003D000>;
+        };
+
+        /* Slot B: 0x3F000 - 0x7C000 (244KB) */
+        slot1_partition: partition@3f000 {
+            label = "slot-b";
+            reg = <0x0003F000 0x0003D000>;
+        };
+
+        /* Boot Control Block: 0x7C000 - 0x7D000 (4KB) */
+        boot_ctrl_partition: partition@7c000 {
+            label = "boot-control";
+            reg = <0x0007C000 0x00001000>;
+        };
+
+        /* OTA State: 0x7D000 - 0x7E000 (4KB) */
+        ota_state_partition: partition@7d000 {
+            label = "ota-state";
+            reg = <0x0007D000 0x00001000>;
+        };
+
+        /* Settings/NVS: 0x7E000 - 0x80000 (8KB) */
+        storage_partition: partition@7e000 {
+            label = "storage";
+            reg = <0x0007E000 0x00002000>;
+        };
+    };
+};
+
+/* Ensure flash controller is enabled */
+&flash_controller {
+    status = "okay";
+};
